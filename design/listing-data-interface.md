@@ -23,11 +23,14 @@ transitional restructuring:
    as filter conditions passed through the interface, instead of a function
    the view supplies.
 
-The goal is that when we later replace IndexedDB with a better store (for
-example SQLite compiled to WebAssembly), only the implementation behind the
-interface changes. Higher-level code never learns that today's
-implementation reads everything into memory, so nothing above the interface
-gets built on that assumption.
+The interface promises query semantics (filter, sort, page, count) and
+says nothing about how they're computed. In the near term the
+implementation is an inefficient full read of IndexedDB; later it might be
+a better local store (for example SQLite compiled to WebAssembly) or
+delegate to a server, as scout's does. Consumers cannot tell the
+difference — that's the point. Higher-level code never learns that today's
+implementation reads everything into memory, so nothing above the
+interface gets built on that assumption.
 
 ## Background: how the listing reads data today
 
@@ -122,7 +125,9 @@ doing yet"), but the proposal shrinks it.
 
 Scout's UI queries a server: `getTranscripts(dir, filter, orderBy,
 pagination)` returns one page plus a total count, and the UI wraps that in
-react-query hooks. We build the same shape with IndexedDB behind it.
+react-query hooks. We adopt the same shape. What sits behind it — today's
+IndexedDB scan, a better local engine, or a server call — is an
+implementation choice consumers never see.
 
 The interface needs more than one method, because the listing page needs
 more than rows:
@@ -361,6 +366,14 @@ implementation:
 Either is acceptable as a transitional wart, because it's now confined to
 one place with a written exit path.
 
+Be precise about what these warts cost: a function cannot be serialized.
+Any closure crossing the interface (the view-level accessors here, the
+searchable-text function in `getMatches`) is compatible with a local
+implementation only. A server-backed implementation is blocked until the
+condition columns and searchable text it needs are expressible as data.
+So the exit paths aren't just cleanliness — they're prerequisites for one
+of the futures this interface exists to allow.
+
 ## What we are deliberately not doing yet
 
 - **Declaring the full column schema.** Score columns are an open-ended
@@ -374,11 +387,12 @@ one place with a written exit path.
   the general case on *any* backend without a per-path index. What is
   IndexedDB-specific is the cost profile: every record must cross into
   JavaScript to be tested (structured-clone deserialization), and sorting
-  requires holding the full row set in JS memory. A real engine scans with
-  filter pushdown and page-sized memory. That's why the interface promises
-  *semantics* (filter, sort, page, count) and stays silent about cost —
-  the scan survives the backend swap; its cost profile doesn't; so nothing
-  above the interface may be tuned around it.
+  requires holding the full row set in JS memory. A real engine — a local
+  one, or one behind a server — scans with filter pushdown and page-sized
+  memory. That's why the interface promises *semantics* (filter, sort,
+  page, count) and stays silent about cost — the scan survives the backend
+  swap; its cost profile doesn't; so nothing above the interface may be
+  tuned around it.
 - **Changing the paging scheme.** Frozen-ordering snapshots with
   offset-based cursors stay. Scout's keyset cursors need index-walkable
   sorts, which IndexedDB can't provide for realistic queries (see the plan
