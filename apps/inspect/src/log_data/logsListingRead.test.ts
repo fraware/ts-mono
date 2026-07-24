@@ -26,6 +26,7 @@ import { setRows, writeListing } from "./logsContent";
 import {
   readLogsListing,
   readLogsListingMatches,
+  readLogsListingOverlayOffsets,
   readLogsListingPage,
   readLogsOverview,
   type LogsListingPageQuery,
@@ -560,22 +561,29 @@ describe("readLogsListingPage", () => {
     ]);
   });
 
-  test("cache-only scopes fall back to the scan path as one full page", async () => {
+  test("cache-only scopes take the scan path but stay positionally paged", async () => {
     setRows("/cache/logs", [
-      { name: "/cache/logs/a.json", task: "t" } as Log,
-      { name: "/cache/logs/b.json", task: "t" } as Log,
+      { name: "/cache/logs/a.json", task: "t", task_id: "t-a" } as Log,
+      { name: "/cache/logs/b.json", task: "t", task_id: "t-b" } as Log,
     ]);
     await databaseService.closeDatabase();
 
+    // The cursor must be honored even here: offset-addressed page queries
+    // (and a mid-session database→cache degrade under a stale-source key)
+    // rely on a page at offset N holding rows N..N+limit whichever source
+    // the read dispatches to.
     const query = pageQuery({ logDir: "/cache/logs", prefix: "/cache/logs" });
-    const page = await readLogsListingPage(query, { cursor: null, limit: 1 });
-    // The whole listing in one page: cache-only scopes don't paginate.
-    expect(page.items.map((row) => row.name)).toEqual([
-      "/cache/logs/a.json",
-      "/cache/logs/b.json",
-    ]);
-    expect(page.total_count).toBe(2);
-    expect(page.next_cursor).toBeNull();
+    const first = await readLogsListingPage(query, { cursor: null, limit: 1 });
+    expect(first.items.map((row) => row.name)).toEqual(["/cache/logs/a.json"]);
+    expect(first.total_count).toBe(2);
+    expect([...(first.universe_task_ids ?? [])].sort()).toEqual(["t-a", "t-b"]);
+
+    const second = await readLogsListingPage(query, {
+      cursor: first.next_cursor,
+      limit: 1,
+    });
+    expect(second.items.map((row) => row.name)).toEqual(["/cache/logs/b.json"]);
+    expect(second.next_cursor).toBeNull();
   });
 });
 
@@ -840,5 +848,142 @@ describe("readLogsListingMatches", () => {
         orderValues: { name: "/test/logs/c.json" },
       },
     ]);
+  });
+});
+
+describe("readLogsListingOverlayOffsets", () => {
+  let databaseService: DatabaseService;
+
+  beforeEach(async () => {
+    databaseService = createDatabaseService();
+    holder.service = databaseService;
+    await databaseService.openDatabase();
+    queryClient.clear();
+  });
+
+  afterEach(async () => {
+    queryClient.clear();
+    try {
+      await databaseService.closeDatabase();
+    } catch {
+      // Already closed in the cache-path test.
+    }
+    await Dexie.delete(DB_NAME);
+  });
+
+  const nameAsc = [{ column: "name", direction: "ASC" as const }];
+
+  const offsetsQuery = (overrides?: {
+    filter?: LogsListingPageQuery<Log>["filter"];
+    orderBy?: LogsListingPageQuery<Log>["orderBy"];
+    logDir?: string;
+  }): LogsListingPageQuery<Log> => {
+    const logDir = overrides?.logDir ?? "/test/logs";
+    return {
+      logDir,
+      prefix: logDir,
+      toRow: (log: LogListingRow) => log,
+      universe: "test-universe",
+      accessorsKey: "accessors-v1",
+      filter: overrides?.filter,
+      orderBy: overrides?.orderBy,
+      plan: createListingPlan({
+        filter: overrides?.filter,
+        orderBy: overrides?.orderBy,
+        getValue,
+        getComparator: () => undefined,
+      }),
+    };
+  };
+
+  const overlay = (name: string): Log => ({ name }) as Log;
+
+  test("returns universe insertion offsets, ties keeping universe rows first", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/b.json": preview({ task_id: "t-b" }),
+      "/test/logs/d.json": preview({ task_id: "t-d" }),
+    });
+
+    const offsets = await readLogsListingOverlayOffsets(
+      offsetsQuery({ orderBy: nameAsc }),
+      [
+        overlay("/test/logs/a.json"),
+        // A tie with an existing universe row must insert after it
+        // (mergeSortedRows keeps base rows first on ties).
+        overlay("/test/logs/b.json"),
+        overlay("/test/logs/c.json"),
+        overlay("/test/logs/e.json"),
+      ],
+      5
+    );
+    expect(offsets).toEqual([0, 1, 1, 2]);
+  });
+
+  test("no active sort places every overlay after the whole universe", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task_id: "t-a" }),
+      "/test/logs/b.json": preview({ task_id: "t-b" }),
+    });
+
+    const offsets = await readLogsListingOverlayOffsets(
+      offsetsQuery(),
+      [overlay("/test/logs/0.json"), overlay("/test/logs/z.json")],
+      5
+    );
+    expect(offsets).toEqual([2, 2]);
+  });
+
+  test("counts only rows matching the plan's filter", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ model: "gpt-4", task_id: "t-a" }),
+      "/test/logs/b.json": preview({ model: "claude", task_id: "t-b" }),
+      "/test/logs/c.json": preview({ model: "gpt-5", task_id: "t-c" }),
+    });
+
+    const filter = new Column("model").ilike("gpt%");
+    const offsets = await readLogsListingOverlayOffsets(
+      offsetsQuery({ filter, orderBy: nameAsc }),
+      [overlay("/test/logs/z.json")],
+      5
+    );
+    // The filtered universe is [a, c] — the excluded row must not count.
+    expect(offsets).toEqual([2]);
+  });
+
+  test("offsets index the cached snapshot's ordering, like page cursors", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/b.json": preview({ task_id: "t-b" }),
+      "/test/logs/c.json": preview({ task_id: "t-c" }),
+    });
+    const query = offsetsQuery({ orderBy: nameAsc });
+    // Prime the snapshot via a page read, then land an earlier-sorting row
+    // without an invalidation: it is not part of the frozen ordering the
+    // page cursors index, so it must not shift the overlay offsets either.
+    await readLogsListingPage(query, { cursor: null, limit: 1 });
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task_id: "t-a" }),
+    });
+
+    const offsets = await readLogsListingOverlayOffsets(
+      query,
+      [overlay("/test/logs/aa.json"), overlay("/test/logs/z.json")],
+      1
+    );
+    expect(offsets).toEqual([0, 2]);
+  });
+
+  test("cache-only scopes compute offsets from the scan", async () => {
+    setRows("/cache/logs", [
+      { name: "/cache/logs/a.json", task: "t" } as Log,
+      { name: "/cache/logs/c.json", task: "t" } as Log,
+    ]);
+    await databaseService.closeDatabase();
+
+    const offsets = await readLogsListingOverlayOffsets(
+      offsetsQuery({ logDir: "/cache/logs", orderBy: nameAsc }),
+      [overlay("/cache/logs/b.json"), overlay("/cache/logs/d.json")],
+      5
+    );
+    expect(offsets).toEqual([1, 2]);
   });
 });

@@ -28,7 +28,7 @@ import { getLogRows, isCacheOnlyListingScope } from "./logsContent";
  *   `namesInScope` in logsContent) and db-less sessions (the database
  *   failed to open; single-file mode renders no log list at all).
  */
-const logsListingSource = (logDir: string): "database" | "cache" =>
+export const logsListingSource = (logDir: string): "database" | "cache" =>
   getDatabaseService().opened() && !isCacheOnlyListingScope(logDir)
     ? "database"
     : "cache";
@@ -208,8 +208,8 @@ export interface LogsListingPageResult<
   TRow,
 > extends DatabaseListingResult<TRow> {
   /** Distinct task_ids across the whole filtered universe (see
-   *  {@link LogsListingSnapshot.task_ids}); unset on the cache path, whose
-   *  single page is the whole universe. */
+   *  {@link LogsListingSnapshot.task_ids}); the cache path derives them
+   *  from its scan. */
   universe_task_ids?: string[];
 }
 
@@ -277,7 +277,10 @@ const fetchLogsListingSnapshot = <TRow>(
  * with `next_cursor: null`, silently claiming completeness. Cache-only
  * scopes (db-less sessions, out-of-namespace dirs) don't take the snapshot
  * path at all — their rows already live in memory, so one scan per read
- * stays the simpler and equally-cheap form.
+ * stays the simpler and equally-cheap form. The cache path still honors
+ * the cursor: page reads must be positionally correct whichever source a
+ * read dispatches to, so a mid-session database→cache degrade can never
+ * serve the whole listing at a page's offset.
  */
 export const readLogsListingPage = async <TRow>(
   query: LogsListingPageQuery<TRow>,
@@ -285,9 +288,21 @@ export const readLogsListingPage = async <TRow>(
 ): Promise<LogsListingPageResult<TRow>> => {
   const { logDir, prefix, toRow, plan } = query;
   if (logsListingSource(logDir) === "cache") {
-    // No universe_task_ids: the cache path's single page IS the whole
-    // universe, so the anti-join's loaded-window fallback already covers it.
-    return readLogsListing(logDir, prefix, toRow, plan);
+    const entries = await scanListingEntries(logDir, prefix, toRow, plan);
+    const taskIds = new Set<string>();
+    for (const { log } of entries) {
+      if (log.task_id) taskIds.add(log.task_id);
+    }
+    const rows = entries.map((entry) => entry.row);
+    return {
+      ...pageRows(rows, {
+        limit: page.limit,
+        cursor: page.cursor ?? null,
+        direction: "forward",
+      }),
+      total_count: rows.length,
+      universe_task_ids: [...taskIds],
+    };
   }
   // Fresh until invalidated (see above); short gcTime because the key list
   // + inline first page are per-(filter, orderBy) copies and the query has
@@ -514,4 +529,53 @@ export const readLogsListingMatches = async <TRow>(
   }
   matches.sort((a, b) => a.offset - b.offset);
   return matches;
+};
+
+/**
+ * Universe insertion offsets for overlay rows (pending tasks — rows with no
+ * database record that render merged into the listing): for each overlay
+ * row, the number of universe rows sorting at-or-before it under the active
+ * plan. Ties keep universe rows first (`mergeSortedRows`' contract), so
+ * inserting overlay row j at `offsets[j]` reproduces the merge over the
+ * whole universe rather than the loaded window — the fix for overlay rows
+ * drifting with the loaded-page boundary. With no active sort every offset
+ * is the universe size (the unsorted listing shows transient rows after
+ * all files, as `mergeSortedRows` documents).
+ *
+ * Universe membership joins through the snapshot (like the match read), so
+ * the offsets index the same frozen ordering as page cursors; the scan and
+ * the snapshot build overlap for the same reason the match read's do.
+ */
+export const readLogsListingOverlayOffsets = async <TRow>(
+  query: LogsListingPageQuery<TRow>,
+  overlayRows: TRow[],
+  pageSize: number
+): Promise<number[]> => {
+  const { logDir, prefix, toRow, plan } = query;
+  const compare = plan.compare;
+  if (logsListingSource(logDir) === "cache") {
+    const rows = await scanListingRows(logDir, prefix, toRow, plan);
+    return overlayRows.map((overlay) => {
+      if (compare === undefined) return rows.length;
+      let count = 0;
+      for (const row of rows) if (compare(row, overlay) <= 0) count += 1;
+      return count;
+    });
+  }
+  if (compare === undefined) {
+    const snapshot = await fetchLogsListingSnapshot(query, pageSize);
+    return overlayRows.map(() => snapshot.keys.length);
+  }
+  const [snapshot, entries] = await Promise.all([
+    fetchLogsListingSnapshot(query, pageSize),
+    scanListingEntries(logDir, prefix, toRow, plan, { sorted: false }),
+  ]);
+  const members = new Set(snapshot.keys);
+  return overlayRows.map((overlay) => {
+    let count = 0;
+    for (const { log, row } of entries) {
+      if (members.has(log.name) && compare(row, overlay) <= 0) count += 1;
+    }
+    return count;
+  });
 };
