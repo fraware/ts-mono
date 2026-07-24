@@ -16,7 +16,7 @@ import { LogListGrid } from "./LogListGrid";
 
 const holder = vi.hoisted(() => ({
   matches: [] as LogsListingMatch[],
-  ensureOffsetLoaded: vi.fn(),
+  scrollToIndex: vi.fn(),
   openFind: undefined as (() => void) | undefined,
   patchGridState: vi.fn(),
 }));
@@ -104,12 +104,14 @@ vi.mock("../listing/useLogsListingQuery", () => ({
 
 interface MockDataGridProps {
   selectedRowId?: string;
+  scrollToIndexRef?: RefObject<((index: number) => void) | null>;
 }
 
 vi.mock("../../shared/data-grid/DataGrid", () => ({
-  DataGrid: ({ selectedRowId }: MockDataGridProps) => (
-    <div data-testid="selected-row">{selectedRowId}</div>
-  ),
+  DataGrid: ({ selectedRowId, scrollToIndexRef }: MockDataGridProps) => {
+    if (scrollToIndexRef) scrollToIndexRef.current = holder.scrollToIndex;
+    return <div data-testid="selected-row">{selectedRowId}</div>;
+  },
 }));
 
 afterEach(cleanup);
@@ -120,20 +122,28 @@ describe("LogListGrid Find pagination", () => {
       { id: "/logs/loaded.eval", offset: 0 },
       { id: "/logs/unloaded.eval", offset: 750 },
     ];
-    holder.ensureOffsetLoaded.mockReset();
+    holder.scrollToIndex.mockReset();
     holder.patchGridState.mockReset();
     holder.openFind = undefined;
   });
 
-  const renderGrid = () => {
-    const loadedRow: LogListRow = {
-      id: "/logs/loaded.eval",
-      name: "loaded.eval",
-      type: "file",
-    };
-    return render(
+  const loadedRow: LogListRow = {
+    id: "/logs/loaded.eval",
+    name: "loaded.eval",
+    type: "file",
+  };
+
+  const renderGrid = () =>
+    render(
       <LogListGrid
-        rows={[loadedRow]}
+        rowCount={1000}
+        rowAt={(index) => (index === 0 ? loadedRow : undefined)}
+        overlayRows={[]}
+        // One pinned folder ahead of the files, so the mapping is visible
+        // in the jump target (offset N → row index N + 1).
+        fileOffsetToRowIndex={(offset) => offset + 1}
+        rowIndexById={() => undefined}
+        onVisibleRangeChange={() => {}}
         totalRowCount={2}
         sorting={[]}
         busy={false}
@@ -143,13 +153,8 @@ describe("LogListGrid Find pagination", () => {
           universe: "logs::/logs",
           toRow: () => undefined,
         }}
-        hasMoreRows
-        fetchMoreRows={() => {}}
-        ensureFileOffsetLoaded={holder.ensureOffsetLoaded}
-        autoFetchPaused={false}
       />
     );
-  };
 
   const openFind = () => {
     act(() => holder.openFind?.());
@@ -158,14 +163,12 @@ describe("LogListGrid Find pagination", () => {
     });
   };
 
-  test("loads a sole match outside the rendered page instead of reporting no results", async () => {
+  test("jumps to a sole match outside the loaded pages instead of reporting no results", async () => {
     holder.matches = [{ id: "/logs/unloaded.eval", offset: 750 }];
     renderGrid();
     openFind();
 
-    await waitFor(() =>
-      expect(holder.ensureOffsetLoaded).toHaveBeenCalledWith(750)
-    );
+    await waitFor(() => expect(holder.scrollToIndex).toHaveBeenCalledWith(751));
     expect(screen.getByTestId("match-state")).toHaveTextContent("0:1");
     expect(screen.getByTestId("no-results")).toHaveTextContent("false");
     expect(screen.getByTestId("selected-row")).toHaveTextContent(
@@ -173,22 +176,18 @@ describe("LogListGrid Find pagination", () => {
     );
   });
 
-  test("navigates the complete match list and loads an unloaded match's offset", async () => {
+  test("navigates the complete match list, jumping to an unloaded match's offset", async () => {
     renderGrid();
 
     openFind();
 
-    await waitFor(() =>
-      expect(holder.ensureOffsetLoaded).toHaveBeenCalledWith(0)
-    );
+    await waitFor(() => expect(holder.scrollToIndex).toHaveBeenCalledWith(1));
     expect(screen.getByTestId("match-state")).toHaveTextContent("0:2");
-    holder.ensureOffsetLoaded.mockClear();
+    holder.scrollToIndex.mockClear();
 
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
 
-    await waitFor(() =>
-      expect(holder.ensureOffsetLoaded).toHaveBeenCalledWith(750)
-    );
+    await waitFor(() => expect(holder.scrollToIndex).toHaveBeenCalledWith(751));
     expect(screen.getByTestId("match-state")).toHaveTextContent("1:2");
     expect(screen.getByTestId("selected-row")).toHaveTextContent(
       "/logs/unloaded.eval"

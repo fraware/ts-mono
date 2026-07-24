@@ -16,6 +16,7 @@ import type {
 import {
   useDatabaseLogsListingQuery,
   useLogsListingMatches,
+  useLogsListingOverlayOffsets,
 } from "./useLogsListingQuery";
 
 interface Row {
@@ -37,6 +38,7 @@ const holder = vi.hoisted(() => ({
   records: [] as { name: string; model?: string }[],
   read: vi.fn(),
   readMatches: vi.fn(),
+  readOverlayOffsets: vi.fn(),
 }));
 
 vi.mock("../../../log_data", () => ({
@@ -48,12 +50,15 @@ vi.mock("../../../log_data", () => ({
     ...parts.map((part) => part ?? null),
   ],
   listingKeyUniverse: (queryKey: readonly unknown[]) => queryKey[3],
+  logsListingSource: () => "database",
   readLogsListingPage: (
     ...args: Parameters<ReadListingPage>
   ): ReturnType<ReadListingPage> =>
     holder.read(...args) as ReturnType<ReadListingPage>,
   readLogsListingMatches: (...args: unknown[]): Promise<LogsListingMatch[]> =>
     holder.readMatches(...args) as Promise<LogsListingMatch[]>,
+  readLogsListingOverlayOffsets: (...args: unknown[]): Promise<number[]> =>
+    holder.readOverlayOffsets(...args) as Promise<number[]>,
 }));
 
 const records = [
@@ -124,6 +129,9 @@ describe("useDatabaseLogsListingQuery", () => {
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
 
+  const loadedNames = (data?: { loadedRows: Row[] }) =>
+    data?.loadedRows.map((row) => row.name);
+
   test("shapes and queries source records through the listing seam", async () => {
     const { result } = renderHook(
       () =>
@@ -138,11 +146,12 @@ describe("useDatabaseLogsListingQuery", () => {
 
     expect(result.current.result.loading).toBe(true);
     await waitFor(() =>
-      expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
-        "/logs/a.eval",
-      ])
+      expect(loadedNames(result.current.result.data)).toEqual(["/logs/a.eval"])
     );
     expect(result.current.result.loading).toBe(false);
+    expect(result.current.result.data?.total_count).toBe(1);
+    expect(result.current.result.data?.rowAt(0)?.name).toBe("/logs/a.eval");
+    expect(result.current.result.data?.rowAt(1)).toBeUndefined();
   });
 
   test("queries the seam even without an active filter", async () => {
@@ -153,14 +162,14 @@ describe("useDatabaseLogsListingQuery", () => {
 
     // Source (listing) order is preserved when no sort is active.
     await waitFor(() =>
-      expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
+      expect(loadedNames(result.current.result.data)).toEqual([
         "/logs/b.eval",
         "/logs/a.eval",
       ])
     );
   });
 
-  test("passes the page's universe task ids through the flattened result", async () => {
+  test("passes the page's universe task ids through the window", async () => {
     holder.read.mockImplementation(() =>
       Promise.resolve({
         items: [],
@@ -197,7 +206,7 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(result.current.result.data).toBeUndefined();
   });
 
-  test("keeps the previous result across re-filters within one universe", async () => {
+  test("holds the previous window across re-filters within one universe", async () => {
     const { result, rerender } = renderHook(
       (props) => useDatabaseLogsListingQuery<Row>(props),
       {
@@ -208,26 +217,23 @@ describe("useDatabaseLogsListingQuery", () => {
       }
     );
     await waitFor(() =>
-      expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
-        "/logs/a.eval",
-      ])
+      expect(loadedNames(result.current.result.data)).toEqual(["/logs/a.eval"])
     );
 
-    // Re-filter: the prior page keeps showing (no pending flash) until the
-    // new read lands.
+    // Re-filter: the previous key's window — rows AND total — keeps showing
+    // (no blank/loading flash) until the new key's pages land, then both
+    // swap in one commit.
     rerender(listingParams({ filter: new Column("model").eq("claude") }));
     expect(result.current.result.loading).toBe(false);
-    expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
-      "/logs/a.eval",
-    ]);
+    expect(loadedNames(result.current.result.data)).toEqual(["/logs/a.eval"]);
+    expect(result.current.result.data?.total_count).toBe(1);
     await waitFor(() =>
-      expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
-        "/logs/b.eval",
-      ])
+      expect(loadedNames(result.current.result.data)).toEqual(["/logs/b.eval"])
     );
+    expect(result.current.result.data?.total_count).toBe(1);
   });
 
-  test("re-queries when the accessor schema lands, keeping the rows as placeholder", async () => {
+  test("re-queries when the accessor schema lands, holding the window", async () => {
     const { result, rerender } = renderHook(
       (props) => useDatabaseLogsListingQuery<Row>(props),
       {
@@ -239,8 +245,8 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(holder.read).toHaveBeenCalledTimes(1);
 
     // The scorer schema arriving changes what the plan computes without any
-    // other query input changing — same universe, so the previous rows keep
-    // showing while the re-evaluated read is in flight.
+    // other query input changing — same universe, so the previous window
+    // keeps showing while the re-evaluated read is in flight.
     rerender(listingParams({ accessorsKey: "grader/accuracy:number" }));
     expect(result.current.result.loading).toBe(false);
     expect(result.current.result.data).toBeDefined();
@@ -259,179 +265,104 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(result.current.result.loading).toBe(false);
     expect(result.current.result.data).toBeUndefined();
     expect(result.current.error).toBeDefined();
-    // A settled error must pause commit-driven fetch chaining — the grid
-    // would otherwise retry the failing request in a tight loop.
-    expect(result.current.autoFetchPaused).toBe(true);
   });
 
-  /** Page by 1 regardless of the requested limit so fixtures exercise the
-   *  multi-page path without 500+ records. */
-  const pageByOne = () =>
-    holder.read.mockImplementation(
-      (
-        query: LogsListingPageQuery<Row>,
-        page: { cursor?: Cursor | null; limit: number }
-      ) => {
-        const rows = holder.records
-          .map((record) => query.toRow(record as LogListingRow))
-          .filter((row): row is Row => row !== undefined);
-        const offset =
-          typeof page.cursor?.offset === "number" ? page.cursor.offset : 0;
-        const end = offset + 1;
-        return Promise.resolve({
-          items: rows.slice(offset, end),
-          total_count: rows.length,
-          next_cursor: end < rows.length ? { offset: end } : null,
-        });
-      }
-    );
-
-  test("accumulates pages via fetchNextPage and reports the universe total", async () => {
-    pageByOne();
-
+  test("fetches the page at a jumped-to offset directly, holding the window across the gap", async () => {
     const { result } = renderHook(
       () => useDatabaseLogsListingQuery<Row>(listingParams()),
       { wrapper }
     );
-    await waitFor(() =>
-      expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
-        "/logs/b.eval",
-      ])
-    );
-    // The footer count covers the whole filtered universe, not loaded rows.
+    await waitFor(() => expect(result.current.result.data).toBeDefined());
+    expect(holder.read).toHaveBeenCalledTimes(1);
+
+    // A jump far past every observed page (e.g. Find navigating to a match
+    // on an unloaded page): the page at that offset is fetched directly —
+    // no sequential walk — and while it loads the published window (and
+    // with it the total driving the scrollbar) must not collapse.
+    act(() => result.current.setVisibleRange({ start: 750, end: 760 }));
+    expect(result.current.result.loading).toBe(false);
     expect(result.current.result.data?.total_count).toBe(2);
-    expect(result.current.hasNextPage).toBe(true);
 
-    result.current.fetchNextPage();
     await waitFor(() =>
-      expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
-        "/logs/b.eval",
-        "/logs/a.eval",
-      ])
+      expect(holder.read).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ cursor: { offset: 500 } })
+      )
     );
-    expect(result.current.hasNextPage).toBe(false);
-    expect(result.current.autoFetchPaused).toBe(false);
+    expect(holder.read).toHaveBeenCalledTimes(2);
   });
 
-  test("loads pages through a requested snapshot offset", async () => {
-    holder.records = [
-      ...records,
-      { name: "/logs/c.eval", model: "gpt-5" },
-      { name: "/logs/d.eval", model: "gpt-5" },
-    ];
-    pageByOne();
-
+  test("keeps retained rows through a failed refetch, reporting the error beside them", async () => {
     const { result } = renderHook(
       () => useDatabaseLogsListingQuery<Row>(listingParams()),
       { wrapper }
     );
     await waitFor(() =>
-      expect(result.current.result.data?.items.length).toBe(1)
-    );
-
-    act(() => result.current.ensureOffsetLoaded(2));
-    await waitFor(() =>
-      expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
+      expect(loadedNames(result.current.result.data)).toEqual([
         "/logs/b.eval",
         "/logs/a.eval",
-        "/logs/c.eval",
       ])
-    );
-    expect(holder.read).toHaveBeenLastCalledWith(
-      expect.anything(),
-      expect.objectContaining({ cursor: { offset: 2 } })
-    );
-  });
-
-  test("keeps loading through an offset across query-input identity churn", async () => {
-    holder.records = [
-      ...records,
-      { name: "/logs/c.eval", model: "gpt-5" },
-      { name: "/logs/d.eval", model: "gpt-5" },
-    ];
-    pageByOne();
-
-    const orderBy = () => [{ column: "name", direction: "ASC" as const }];
-    const { result, rerender } = renderHook(
-      (props) => useDatabaseLogsListingQuery<Row>(props),
-      { wrapper, initialProps: listingParams({ orderBy: orderBy() }) }
-    );
-    await waitFor(() =>
-      expect(result.current.result.data?.items.length).toBe(1)
-    );
-
-    act(() => result.current.ensureOffsetLoaded(3));
-    // A grid-state patch re-derives filter/orderBy with fresh identities but
-    // equal values (e.g. persisting a selection as the find band closes) —
-    // the pending request is keyed by value, so it must keep chaining.
-    rerender(listingParams({ orderBy: orderBy() }));
-
-    await waitFor(() =>
-      expect(result.current.result.data?.items.length).toBe(4)
-    );
-  });
-
-  test("keeps retained rows through a failed read, reporting the error beside them", async () => {
-    pageByOne();
-    const { result } = renderHook(
-      () => useDatabaseLogsListingQuery<Row>(listingParams()),
-      { wrapper }
-    );
-    await waitFor(() =>
-      expect(result.current.result.data?.items.length).toBe(1)
     );
     expect(result.current.error).toBeUndefined();
 
-    // The next read fails (a page fetch here; an invalidation refetch is the
-    // same query state) — the loaded rows must keep serving (warm), with the
-    // failure reported beside them rather than through the AsyncData.
+    // An invalidation refetch fails — the loaded rows must keep serving
+    // (warm), with the failure reported beside them rather than through
+    // the AsyncData.
     holder.read.mockRejectedValue(new Error("scan failed"));
-    result.current.fetchNextPage();
+    await act(() => queryClient.invalidateQueries());
     await waitFor(() => expect(result.current.error).toBeDefined());
-    expect(result.current.result.data?.items.map((row) => row.name)).toEqual([
+    expect(loadedNames(result.current.result.data)).toEqual([
       "/logs/b.eval",
+      "/logs/a.eval",
     ]);
     expect(result.current.result.error).toBeUndefined();
-    expect(result.current.autoFetchPaused).toBe(true);
 
     // Recovery: an invalidation refetch (retry banner / write path / sync)
     // that succeeds clears the error and keeps the rows.
-    pageByOne();
-    await queryClient.invalidateQueries();
+    holder.read.mockImplementation(() =>
+      Promise.resolve({
+        items: [{ name: "/logs/b.eval", model: "claude" }],
+        total_count: 1,
+        next_cursor: null,
+      })
+    );
+    await act(() => queryClient.invalidateQueries());
     await waitFor(() => expect(result.current.error).toBeUndefined());
-    expect(result.current.result.data?.items.length).toBeGreaterThan(0);
-    expect(result.current.autoFetchPaused).toBe(false);
+    expect(result.current.result.data?.total_count).toBe(1);
   });
 
-  test("deep paging keeps every loaded page — no retained-page cap", async () => {
-    // Guards against reintroducing react-query's `maxPages`: it drops pages
-    // off the *front*, and with no getPreviousPageParam/scroll-up trigger
-    // the head rows would be unrecoverable (see the query options comment).
-    const pageCount = 25;
-    holder.records = Array.from({ length: pageCount }, (_, i) => ({
-      name: `/logs/${String(i).padStart(2, "0")}.eval`,
+  test("an invalidation refetches only the observed pages", async () => {
+    holder.records = Array.from({ length: 600 }, (_, i) => ({
+      name: `/logs/${String(i).padStart(3, "0")}.eval`,
       model: "claude",
     }));
-    pageByOne();
 
     const { result } = renderHook(
       () => useDatabaseLogsListingQuery<Row>(listingParams()),
       { wrapper }
     );
+    await waitFor(() => expect(result.current.result.data).toBeDefined());
+
+    // Observe pages 0 and 1, then scroll back so only page 0 is observed.
+    act(() => result.current.setVisibleRange({ start: 450, end: 520 }));
     await waitFor(() =>
-      expect(result.current.result.data?.items.length).toBe(1)
+      expect(result.current.result.data?.loadedRows.length).toBe(600)
+    );
+    act(() => result.current.setVisibleRange({ start: 0, end: 10 }));
+    await waitFor(() =>
+      expect(result.current.result.data?.loadedRows.length).toBe(500)
     );
 
-    for (let pages = 1; pages < pageCount; pages++) {
-      result.current.fetchNextPage();
-      await waitFor(() =>
-        expect(result.current.result.data?.items.length).toBe(pages + 1)
+    // Page 1 left observation: the invalidation must refetch page 0 only
+    // (page 1 goes stale and refetches on its next observation).
+    holder.read.mockClear();
+    await act(() => queryClient.invalidateQueries());
+    await waitFor(() => expect(holder.read).toHaveBeenCalled());
+    for (const call of holder.read.mock.calls) {
+      expect(call[1]).toEqual(
+        expect.objectContaining({ cursor: { offset: 0 } })
       );
     }
-
-    expect(result.current.result.data?.items[0]?.name).toBe("/logs/00.eval");
-    expect(result.current.hasNextPage).toBe(false);
-    expect(result.current.autoFetchPaused).toBe(false);
   });
 
   test("does not serve one universe's rows to another", async () => {
@@ -450,6 +381,51 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(result.current.result.data).toBeUndefined();
     expect(result.current.result.loading).toBe(true);
     await waitFor(() => expect(result.current.result.data).toBeDefined());
+  });
+});
+
+describe("useLogsListingOverlayOffsets", () => {
+  let queryClient: QueryClient;
+
+  beforeEach(() => {
+    queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    holder.readOverlayOffsets.mockReset();
+    holder.readOverlayOffsets.mockResolvedValue([1]);
+  });
+
+  const wrapper = ({ children }: PropsWithChildren) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+
+  const offsetsParams = (overrides?: {
+    orderBy?: { column: string; direction: "ASC" | "DESC" }[];
+    rows?: Row[];
+  }) => ({
+    ...listingParams({ orderBy: overrides?.orderBy }),
+    rows: overrides?.rows ?? [{ name: "/logs/p.eval", model: "pending" }],
+  });
+
+  test("resolves offsets through the seam under an active sort", async () => {
+    const { result } = renderHook(
+      () =>
+        useLogsListingOverlayOffsets<Row>(
+          offsetsParams({ orderBy: [{ column: "name", direction: "ASC" }] })
+        ),
+      { wrapper }
+    );
+    await waitFor(() => expect(result.current).toEqual([1]));
+  });
+
+  test("never runs without an active sort (callers append at the end)", async () => {
+    const { result } = renderHook(
+      () => useLogsListingOverlayOffsets<Row>(offsetsParams()),
+      { wrapper }
+    );
+    await Promise.resolve();
+    expect(holder.readOverlayOffsets).not.toHaveBeenCalled();
+    expect(result.current).toBeUndefined();
   });
 });
 

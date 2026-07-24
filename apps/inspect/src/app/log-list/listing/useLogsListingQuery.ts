@@ -1,5 +1,4 @@
-import { hashKey, useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import type { InfiniteData } from "@tanstack/react-query";
+import { hashKey, useQueries, useQuery } from "@tanstack/react-query";
 import type { SortingState } from "@tanstack/react-table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -11,12 +10,17 @@ import type {
 import { useDebouncedCallback } from "@tsmono/react/hooks";
 import { loading, type AsyncData } from "@tsmono/util";
 
-import type { Cursor } from "../../../client/database/listing";
-import type { LogListingRow, LogsListingMatch } from "../../../log_data";
+import type {
+  LogListingRow,
+  LogsListingMatch,
+  LogsListingPageResult,
+} from "../../../log_data";
 import {
   databaseLogsListingKey,
   listingKeyUniverse,
+  logsListingSource,
   readLogsListingMatches,
+  readLogsListingOverlayOffsets,
   readLogsListingPage,
 } from "../../../log_data";
 
@@ -114,54 +118,100 @@ interface UseDatabaseLogsListingParams<TRow> {
  */
 const kLogsListingPageSize = 500;
 
-/** {@link useDatabaseLogsListingQuery}'s result: the flattened page window
- *  plus the paging controls the grid's scroll trigger drives. */
+/** A rendered row range in file-universe offsets (inclusive bounds). */
+export interface ListingVisibleRange {
+  start: number;
+  end: number;
+}
+
+/** Rows fetched beyond the rendered range on each side, so a steady scroll
+ *  reaches pages already in flight instead of lingering on skeletons
+ *  (~3,000px at the default row height — of the order of scout's 2,000px
+ *  near-end threshold). */
+const kVisibleRangeOverscanRows = 100;
+
+/** The published listing window: the whole universe's shape plus the
+ *  observed pages' rows. */
+export interface LogsListingWindow<TRow> {
+  /** Total rows in the filtered universe (the snapshot's key count). */
+  total_count: number;
+  /** Distinct task_ids across the whole filtered universe (the pending
+   *  anti-join input). */
+  universe_task_ids?: string[];
+  /** The row at a universe offset, or `undefined` while its page is
+   *  unloaded — the grid renders those as skeletons. A page holding
+   *  dropped holes (keys deleted between snapshot and read) leaves its
+   *  tail offsets unloaded until the next snapshot rebuild. */
+  rowAt: (offset: number) => TRow | undefined;
+  /** The observed pages' rows in offset order — for window-scoped
+   *  derivations (e.g. re-deriving the pending anti-join against what is
+   *  actually rendered). */
+  loadedRows: TRow[];
+}
+
+/** {@link useDatabaseLogsListingQuery}'s result: the assembled listing
+ *  window plus the range input that drives which pages are observed. */
 export interface DatabaseLogsListing<TRow> {
   /** What to render. A settled failure reports here only when there is
    *  nothing to show (cold — typically the universe's first read failing):
-   *  react-query retains the loaded pages across a failed refetch, and
-   *  `placeholderData` carries the previous rows across a re-filter, so
+   *  react-query retains observed pages across a failed refetch, and the
+   *  listing-level hold carries the previous window across a re-filter, so
    *  those keep serving as `data` (warm) with the failure surfaced through
    *  `error` beside them. */
-  result: AsyncData<LogsListingResult<TRow>>;
-  /** The last read failed — set for warm and cold failures alike (see
-   *  `result`). Sticky once sync settles (focus/reconnect refetches are
-   *  off); recovery is an invalidation (`invalidateDatabaseLogsListings`),
-   *  a scroll-driven `fetchNextPage`, or a filter/sort change. */
+  result: AsyncData<LogsListingWindow<TRow>>;
+  /** The last read failed — the first settled error among the observed page
+   *  queries (a failed snapshot build rejects every observed page, so one
+   *  broken build still surfaces). Sticky once settled (focus/reconnect
+   *  refetches are off); recovery is an invalidation
+   *  (`invalidateDatabaseLogsListings`) or a filter/sort/range change. */
   error: Error | undefined;
-  /** More pages exist beyond the loaded window. */
-  hasNextPage: boolean;
-  /** Load the next page. In-flight-safe: a scroll burst never restarts an
-   *  ongoing page fetch (`cancelRefetch: false`, like scout). */
-  fetchNextPage: () => void;
-  /** Ensure the head-first page window covers a snapshot offset. Used by
-   *  Find to materialize an unloaded match without guessing from row
-   *  counts (pages may contain dropped holes). */
-  ensureOffsetLoaded: (offset: number) => void;
-  /** A chained (commit-driven) fetch can't make progress right now, so the
-   *  grid must pause its after-commit near-end check: after a settled error
-   *  it would tight-loop the failing request — the fetch's own re-render
-   *  commits with the near-end condition still true, chaining unboundedly.
-   *  Scroll-driven fetches stay live (they are the retry path out of an
-   *  error). */
-  autoFetchPaused: boolean;
+  /** Report the grid's rendered row range (file-universe offsets); the
+   *  observed page queries follow it. Stable identity; cheap to call per
+   *  range change. */
+  setVisibleRange: (range: ListingVisibleRange) => void;
+}
+
+/** `useMemo` with an explicit, variable-length dependency list — the page
+ *  window's deps are one data reference per observed page, and the page
+ *  count changes with the visible range. Caches via the derive-and-adjust-
+ *  during-render state pattern (react.dev), so it stays within the React
+ *  compiler's rules (no ref reads during render). */
+function useStableValue<T>(deps: readonly unknown[], build: () => T): T {
+  const [cache, setCache] = useState<
+    { deps: readonly unknown[]; value: T } | undefined
+  >(undefined);
+  if (
+    cache !== undefined &&
+    cache.deps.length === deps.length &&
+    deps.every((dep, index) => dep === cache.deps[index])
+  ) {
+    return cache.value;
+  }
+  const value = build();
+  setCache({ deps, value });
+  return value;
 }
 
 /**
- * The log listing query: a react-query `useInfiniteQuery` over
- * `readLogsListingPage` — pages compose over the tier-1 key-list snapshot
- * (built once per (universe, accessors, filter, orderBy), shared by every
- * page, invalidated by the write path's throttled root-key invalidation).
+ * The log listing query: offset-addressed page queries driven by the grid's
+ * visible range. Each observed page is its own react-query entry over
+ * `readLogsListingPage`, composing over the tier-1 key-list snapshot (built
+ * once per (universe, accessors, filter, orderBy), shared by every page,
+ * invalidated by the write path's throttled root-key invalidation) — so an
+ * invalidation refetches only the observed pages, pages leaving observation
+ * drop via plain `gcTime` (no `maxPages` semantics; scroll-back refetching
+ * is emergent), and jumping anywhere in the universe is just a range change.
  * Rows are read from the listing source (IndexedDB in dir mode; db-less and
  * cache-only scopes fall back to the react-query cache inside the same
  * queryFn) and shaped per view inside the queryFn, so the full row list
  * never has to live in memory for the grid's sake. Results are asynchronous
  * by design: the first read shows whatever has replicated so far, and the
- * write path's throttled invalidation streams further rows in as they land
- * (refetching both tiers; `placeholderData` prevents blanking). `loading`
- * covers hydration and the universe's first read; within one universe a
- * re-filter/sort reports the previous result as `data` (no loading flash)
- * until the new read lands.
+ * write path's throttled invalidation streams further rows in as they land.
+ * `loading` covers hydration and the universe's first read; within one
+ * universe a re-filter/sort keeps publishing the previous key's window
+ * (rows and total) until the new key's needed pages all land, then swaps
+ * atomically — the listing-level no-blank-flash hold (see the plan doc's
+ * range-driven amendment).
  */
 export function useDatabaseLogsListingQuery<TRow>({
   filter,
@@ -173,58 +223,243 @@ export function useDatabaseLogsListingQuery<TRow>({
   listing,
 }: UseDatabaseLogsListingParams<TRow>): DatabaseLogsListing<TRow> {
   const { logDir, prefix, universe, toRow } = listing;
-  const queryKey = useMemo(
-    () => databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
-    [universe, accessorsKey, filter, orderBy]
-  );
-  // The pending ensure-offset request, tagged with the query it was issued
-  // against by key *value* (react-query's own hash), not input references:
-  // `filter`/`orderBy` get fresh identities from unrelated grid-state
-  // patches (e.g. persisting a selection re-derives `sorting ?? []`), and a
-  // reference guard would cancel an in-flight load-through over a no-op
-  // change.
-  const [offsetRequest, setOffsetRequest] = useState<{
-    offset: number;
-    keyHash: string;
-  }>();
-  const queryKeyHash = useMemo(() => hashKey(queryKey), [queryKey]);
 
-  // Flatten the page window into the result shape consumers already read.
-  // Every page reports the snapshot's total_count; page 0 is the freshest
-  // after a partial refetch. Passed as a stable `select` so react-query
-  // memoizes the flattening (a per-render flatMap would give consumers a
-  // fresh items identity every render).
-  const select = useCallback(
-    (
-      data: InfiniteData<LogsListingResult<TRow>, Cursor | null>
-    ): LogsListingResult<TRow> => ({
-      items:
-        data.pages.length === 1
-          ? (data.pages[0]?.items ?? [])
-          : data.pages.flatMap((page) => page.items),
-      total_count: data.pages[0]?.total_count ?? 0,
-      universe_task_ids: data.pages[0]?.universe_task_ids,
-      next_cursor: data.pages.at(-1)?.next_cursor ?? null,
-    }),
-    []
+  const [range, setRange] = useState<ListingVisibleRange>({
+    start: 0,
+    end: 0,
+  });
+  const setVisibleRange = useCallback((next: ListingVisibleRange) => {
+    setRange((prev) =>
+      prev.start === next.start && prev.end === next.end ? prev : next
+    );
+  }, []);
+
+  // Where this render's page reads dispatch. Keying pages on it re-keys the
+  // window on the render after a mid-session database→cache degrade instead
+  // of mixing sources under one key (the read itself is positionally
+  // correct either way — its cache path honors the cursor).
+  const source = logsListingSource(logDir);
+  const listingKey = useMemo(
+    () =>
+      [
+        ...databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
+        source,
+      ] as const,
+    [universe, accessorsKey, filter, orderBy, source]
+  );
+  const keyHash = useMemo(() => hashKey([...listingKey]), [listingKey]);
+
+  // Pages needed by the reported range plus overscan. The tail extension is
+  // clamped by the last *published* total (one render behind by design: the
+  // range itself is bounded by the grid's row count, which derives from
+  // that same published total — the held one during a hold, so the two stay
+  // in one coordinate space). State synced at the end of the render (the
+  // adjust-during-render pattern), not a ref — refs aren't readable during
+  // render.
+  const [publishedTotal, setPublishedTotal] = useState<number | undefined>(
+    undefined
+  );
+  const firstPageIndex = Math.max(
+    0,
+    Math.floor((range.start - kVisibleRangeOverscanRows) / kLogsListingPageSize)
+  );
+  const pageCap =
+    publishedTotal === undefined
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, Math.ceil(publishedTotal / kLogsListingPageSize) - 1);
+  const lastPageIndex = Math.max(
+    firstPageIndex,
+    Math.min(
+      Math.floor(
+        (range.end + kVisibleRangeOverscanRows) / kLogsListingPageSize
+      ),
+      pageCap
+    )
+  );
+  const pageIndices: number[] = [];
+  for (let index = firstPageIndex; index <= lastPageIndex; index++) {
+    pageIndices.push(index);
+  }
+
+  const results = useQueries({
+    queries: pageIndices.map((pageIndex) => ({
+      queryKey: [...listingKey, "page", pageIndex] as const,
+      queryFn: (): Promise<LogsListingPageResult<TRow>> =>
+        readLogsListingPage(
+          {
+            logDir,
+            prefix,
+            toRow,
+            universe,
+            accessorsKey,
+            filter,
+            orderBy,
+            plan: createListingPlan({
+              filter,
+              orderBy,
+              getValue,
+              getComparator,
+              getFilterType,
+            }),
+          },
+          {
+            cursor: { offset: pageIndex * kLogsListingPageSize },
+            limit: kLogsListingPageSize,
+          }
+        ),
+      enabled: universe !== undefined,
+      staleTime: 0,
+      // Pages that leave observation drop via plain gcTime: scroll-back
+      // within it is an instant cache hit, beyond it a natural refetch.
+      gcTime: 30_000,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+    })),
+  });
+
+  const pageData = results.map((result) => result.data);
+  // Every page the current range needs has data — the hold's swap trigger.
+  // Stays true through invalidation refetches (react-query retains page
+  // data), so streaming updates never re-arm the hold.
+  const allSettled =
+    universe !== undefined &&
+    pageData.length > 0 &&
+    pageData.every((data) => data !== undefined);
+  const error =
+    results.find((result) => result.error !== null)?.error ?? undefined;
+
+  // The live window. Rebuilt only when the key, the needed page set, or an
+  // observed page's data actually changes, so the grid doesn't re-render
+  // per page fetch (react-query keeps result.data references stable).
+  const live = useStableValue(
+    [keyHash, pageIndices.join(","), ...pageData],
+    (): LogsListingWindow<TRow> | undefined => {
+      const pages = new Map<number, LogsListingPageResult<TRow>>();
+      pageIndices.forEach((pageIndex, position) => {
+        const data = pageData[position];
+        if (data !== undefined) pages.set(pageIndex, data);
+      });
+      if (pages.size === 0) return undefined;
+      const ordered = [...pages.entries()].sort((a, b) => a[0] - b[0]);
+      const head = ordered[0]![1];
+      return {
+        total_count: head.total_count,
+        universe_task_ids: head.universe_task_ids,
+        rowAt: (offset: number): TRow | undefined => {
+          if (offset < 0) return undefined;
+          const page = pages.get(Math.floor(offset / kLogsListingPageSize));
+          return page?.items[offset % kLogsListingPageSize];
+        },
+        loadedRows: ordered.flatMap(([, page]) => page.items),
+      };
+    }
   );
 
-  const {
-    data,
-    isError,
-    error,
-    hasNextPage,
-    fetchNextPage,
-    isFetching,
-    isPlaceholderData,
-  } = useInfiniteQuery({
-    queryKey,
-    queryFn: ({
-      pageParam,
-    }: {
-      pageParam: Cursor | null;
-    }): Promise<LogsListingResult<TRow>> =>
-      readLogsListingPage(
+  // The listing-level no-blank-flash hold: the last fully-settled key's
+  // window keeps publishing across a same-universe key change (re-filter,
+  // re-sort, the score schema arriving) until the new key's needed pages
+  // all land, then rows + total swap in one commit. Never across universes
+  // (another universe's rows must not leak in). Within one key, live data
+  // wins as soon as any observed page has it (scrolling into unloaded
+  // territory shows skeletons beside loaded rows, not stale rows) — but a
+  // jump past every observed page falls back to the held window too, so
+  // the total (and with it the scrollbar and the jump target) survives the
+  // gap instead of collapsing to a loading state. A render-time ref cache
+  // (idempotent write) so the swap decision is synchronous with the data
+  // that drives it.
+  const [held, setHeld] = useState<
+    | { keyHash: string; universe: string; window: LogsListingWindow<TRow> }
+    | undefined
+  >(undefined);
+  if (
+    allSettled &&
+    live !== undefined &&
+    universe !== undefined &&
+    (held === undefined || held.keyHash !== keyHash || held.window !== live)
+  ) {
+    setHeld({ keyHash, universe, window: live });
+  }
+  const published = allSettled
+    ? live
+    : held !== undefined && held.universe === universe
+      ? held.keyHash === keyHash && live !== undefined
+        ? live
+        : held.window
+      : live;
+  if (published?.total_count !== publishedTotal) {
+    setPublishedTotal(published?.total_count);
+  }
+
+  // Prefer retained/held rows over a settled error (`error` still reports
+  // beside them): replacing a rendered list because one refetch failed
+  // would lose the user's place over a failure a later invalidation may
+  // well heal.
+  const result = useMemo<AsyncData<LogsListingWindow<TRow>>>(() => {
+    if (published !== undefined) return { data: published, loading: false };
+    if (error !== undefined) return { error, loading: false };
+    return loading;
+  }, [published, error]);
+
+  return useMemo(
+    () => ({ result, error, setVisibleRange }),
+    [result, error, setVisibleRange]
+  );
+}
+
+interface UseLogsListingOverlayOffsetsParams<TRow> {
+  /** The same query inputs the row query ran under (pass through from
+   *  `useLogListData` — offsets must index the same universe ordering). */
+  filter?: Condition;
+  orderBy?: OrderByModel[];
+  getValue: ValueAccessor<TRow>;
+  getComparator: (columnId: string) => ValueComparator | undefined;
+  getFilterType?: FilterTypeAccessor;
+  accessorsKey: string;
+  listing: LogsListingDescriptor<TRow>;
+  /** Overlay rows, already filtered + sorted under the same query. */
+  rows: TRow[];
+}
+
+/**
+ * Universe insertion offsets for overlay (pending-task) rows — the query
+ * layer around `readLogsListingOverlayOffsets`, keyed beside the row query
+ * (same root, so the throttled invalidation keeps offsets in sync with
+ * snapshot rebuilds) plus the overlay rows' sort values. Only runs under an
+ * active sort — with none, callers place overlays after the whole universe
+ * without a read. Returns `undefined` while unset/loading; callers fall
+ * back to appending at the end until it lands.
+ */
+export function useLogsListingOverlayOffsets<TRow>({
+  filter,
+  orderBy,
+  getValue,
+  getComparator,
+  getFilterType,
+  accessorsKey,
+  listing,
+  rows,
+}: UseLogsListingOverlayOffsetsParams<TRow>): number[] | undefined {
+  const { logDir, prefix, universe, toRow } = listing;
+  const sorted = (orderBy?.length ?? 0) > 0;
+  // Key by the rows' sort values (not identities): a pending set re-shaped
+  // by a poll tick with unchanged values stays one cache entry.
+  const valuesKey = useMemo(
+    () =>
+      sorted
+        ? rows.map((row) =>
+            (orderBy ?? []).map(({ column }) => getValue(row, column) ?? null)
+          )
+        : [],
+    [sorted, rows, orderBy, getValue]
+  );
+  const query = useQuery({
+    queryKey: [
+      ...databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
+      "overlay-offsets",
+      valuesKey,
+    ],
+    queryFn: (): Promise<number[]> =>
+      readLogsListingOverlayOffsets(
         {
           logDir,
           prefix,
@@ -241,111 +476,16 @@ export function useDatabaseLogsListingQuery<TRow>({
             getFilterType,
           }),
         },
-        { cursor: pageParam, limit: kLogsListingPageSize }
+        rows,
+        kLogsListingPageSize
       ),
-    initialPageParam: null as Cursor | null,
-    getNextPageParam: (lastPage) => lastPage.next_cursor,
-    // Deliberately no `maxPages`: react-query drops capped pages off the
-    // *front*, and with no `getPreviousPageParam`/scroll-up trigger the
-    // head rows would be unrecoverable while the window slides under the
-    // scroll position. A cap also wins no memory while the react-query
-    // logs mirror still holds every row (plan doc, step 7) — bounded
-    // windows arrive with the range-driven page queries sketched there.
-    select,
-    enabled: universe !== undefined,
-    // Keep showing the previous result across re-filters/sorts — and schema
-    // arrivals — within one universe (same row set, possibly re-evaluated);
-    // a different universe's rows must not leak in.
-    placeholderData: (previousData, previousQuery) =>
-      universe !== undefined &&
-      previousQuery !== undefined &&
-      listingKeyUniverse(previousQuery.queryKey) === universe
-        ? previousData
-        : undefined,
+    enabled: sorted && rows.length > 0 && universe !== undefined,
     staleTime: 0,
-    // The page window is a copy per recent (schema, filter, orderBy)
-    // combination — unbounded until the range-driven rework, so scrolled
-    // dirs can park deep windows here. Drop unobserved ones fast (the
-    // snapshot has its own short gcTime — see readLogsListingPage).
     gcTime: 30_000,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
-
-  const fetchNext = useCallback(() => {
-    // Fire-and-forget: page arrival/errors surface through the query state.
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    fetchNextPage({ cancelRefetch: false });
-  }, [fetchNextPage]);
-
-  const ensureOffsetLoaded = useCallback(
-    (offset: number) => {
-      if (!Number.isInteger(offset) || offset < 0) return;
-      setOffsetRequest({ offset, keyHash: queryKeyHash });
-    },
-    [queryKeyHash]
-  );
-
-  // The first snapshot offset the loaded pages don't cover (`next_cursor`
-  // indexes the snapshot key list): `Infinity` once the whole snapshot is
-  // loaded, `undefined` until the key's own data lands — a placeholder is
-  // another query's window, so coverage must never be read off it. Also
-  // the effect's progress trigger: booleans like "covered" can hold their
-  // value across a fast page fetch and stall the chain.
-  const uncoveredFrom =
-    data === undefined || isPlaceholderData
-      ? undefined
-      : (data.next_cursor?.offset ?? Infinity);
-
-  // Render-time state adjustment (not an effect — see the React docs'
-  // setState-during-render form): drop a request that is stale (issued
-  // against another query — it must not resume if that query's inputs
-  // recur, e.g. a scope switch and back) or satisfied (a later snapshot
-  // rebuild could otherwise re-activate it long after Find moved on). A
-  // settled error keeps the request: an invalidation may heal the query,
-  // and the effect below then resumes the chain.
-  if (
-    offsetRequest !== undefined &&
-    (offsetRequest.keyHash !== queryKeyHash ||
-      (uncoveredFrom !== undefined && uncoveredFrom > offsetRequest.offset))
-  ) {
-    setOffsetRequest(undefined);
-  }
-
-  useEffect(() => {
-    if (
-      offsetRequest === undefined ||
-      uncoveredFrom === undefined ||
-      uncoveredFrom > offsetRequest.offset ||
-      isFetching ||
-      isError
-    ) {
-      return;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    fetchNextPage({ cancelRefetch: false });
-  }, [offsetRequest, uncoveredFrom, isFetching, isError, fetchNextPage]);
-
-  // Prefer retained rows over a settled error (`error` still reports beside
-  // them): replacing a rendered list because one refetch failed would lose
-  // the user's place over a failure a later invalidation may well heal.
-  const result = useMemo<AsyncData<LogsListingResult<TRow>>>(() => {
-    if (data !== undefined) return { data, loading: false };
-    if (isError) return { error, loading: false };
-    return loading;
-  }, [data, isError, error]);
-
-  return useMemo(
-    () => ({
-      result,
-      error: error ?? undefined,
-      hasNextPage,
-      fetchNextPage: fetchNext,
-      ensureOffsetLoaded,
-      autoFetchPaused: isError,
-    }),
-    [result, error, hasNextPage, fetchNext, ensureOffsetLoaded, isError]
-  );
+  return query.data;
 }
 
 interface UseLogsListingMatchesParams<TRow> {

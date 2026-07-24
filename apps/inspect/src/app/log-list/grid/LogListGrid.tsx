@@ -51,9 +51,21 @@ interface FindTarget {
 }
 
 interface LogListGridProps {
-  /** Display rows from `useLogListData` (folders pinned, files
-   *  filtered+sorted). */
-  rows: LogListRow[];
+  /** Total virtualized rows from `useLogListData` (folders pinned, then the
+   *  whole file universe with pendings inserted). */
+  rowCount: number;
+  /** Resolve a merged row index to its display row (`undefined` = unloaded
+   *  page → skeleton). */
+  rowAt: (index: number) => LogListRow | undefined;
+  /** Overlay rows (folders + visible pendings) — matched locally by the
+   *  find band (they have no listing record). */
+  overlayRows: LogListRow[];
+  /** Merged row index of a file's snapshot offset (find-match jumps). */
+  fileOffsetToRowIndex: (offset: number) => number;
+  /** Merged row index of an overlay row id (find jumps to folders/pendings). */
+  rowIndexById: (id: string) => number | undefined;
+  /** Report the grid's rendered row range to the page queries. */
+  onVisibleRangeChange: (range: { start: number; end: number }) => void;
   /** Pre-filter row count (drives the empty-state loading indicator, which
    *  shouldn't show when filters merely matched nothing). */
   totalRowCount: number;
@@ -78,20 +90,17 @@ interface LogListGridProps {
   busy: boolean;
   /** The listing source the rows were queried from — the find band runs its
    *  match query against the same universe (so matches cover rows beyond
-   *  the loaded page once the listing paginates). */
+   *  the loaded pages). */
   listing: LogsListingDescriptor<LogListRow>;
-  /** More file rows exist beyond the loaded pages (from `useLogListData`). */
-  hasMoreRows: boolean;
-  /** Load the next page of file rows (in-flight-safe). */
-  fetchMoreRows: () => void;
-  /** Load pages through a file match's snapshot offset. */
-  ensureFileOffsetLoaded: (offset: number) => void;
-  /** Pause the grid's commit-driven fetch chaining (from `useLogListData`). */
-  autoFetchPaused: boolean;
 }
 
 export const LogListGrid: FC<LogListGridProps> = ({
-  rows,
+  rowCount,
+  rowAt,
+  overlayRows,
+  fileOffsetToRowIndex,
+  rowIndexById,
+  onVisibleRangeChange,
   totalRowCount,
   sorting,
   columnFilters,
@@ -102,10 +111,6 @@ export const LogListGrid: FC<LogListGridProps> = ({
   mode = "logs",
   busy,
   listing,
-  hasMoreRows,
-  fetchMoreRows,
-  ensureFileOffsetLoaded,
-  autoFetchPaused,
 }) => {
   const { gridStateByScope, patchGridState } = useLogsListing();
 
@@ -255,17 +260,13 @@ export const LogListGrid: FC<LogListGridProps> = ({
   const { reset: resetMatches } = fileMatches;
 
   // Folders and pending tasks have no listing record; match them locally
-  // over the (small) overlay slice of the display rows.
+  // over the (small) overlay rows.
   const overlayIndex = useMemo(
     () =>
       showFind
-        ? buildSearchIndex(
-            rows.filter((row) => row.type !== "file"),
-            searchColumns,
-            (row) => row.id
-          )
+        ? buildSearchIndex(overlayRows, searchColumns, (row) => row.id)
         : undefined,
-    [showFind, rows, searchColumns]
+    [showFind, overlayRows, searchColumns]
   );
 
   const matchTargets = useMemo<FindTarget[]>(() => {
@@ -286,11 +287,11 @@ export const LogListGrid: FC<LogListGridProps> = ({
     // Folders are pinned above the file universe. Files use the snapshot's
     // complete ordering, loaded or not; transient pending matches merge by
     // the same controlled sort values as the rendered rows.
-    rows
+    overlayRows
       .filter((row) => row.type === "folder" && overlayMatches.has(row.id))
       .forEach((row) => add(folders, { id: row.id, row }));
     fileMatches.matches?.forEach((match) => add(files, match));
-    rows
+    overlayRows
       .filter(
         (row) => row.type === "pending-task" && overlayMatches.has(row.id)
       )
@@ -312,7 +313,7 @@ export const LogListGrid: FC<LogListGridProps> = ({
     findTerm,
     fileMatches.matches,
     overlayIndex,
-    rows,
+    overlayRows,
     orderBy,
     getValue,
     getComparator,
@@ -343,26 +344,28 @@ export const LogListGrid: FC<LogListGridProps> = ({
   const activeMatch = matchTargets[activeMatchIndex];
   const activeMatchId = activeMatch?.id;
 
-  // The single load-through trigger: whenever the active match changes —
-  // a navigation, or the first result arriving without one — and the
-  // debounced match query has settled, load pages through its offset.
-  // DataGrid already waits to scroll a selected id until that row appears
-  // in `rows`.
+  // The single jump trigger: whenever the active match changes — a
+  // navigation, or the first result arriving without one — scroll the grid
+  // to the match's row index. File matches map their snapshot offset (the
+  // scroll materializes the page); overlay matches address by id. The
+  // selected-id scroll in DataGrid still fine-tunes once the row renders.
+  const scrollToIndexRef = useRef<((index: number) => void) | null>(null);
   useEffect(() => {
-    if (
-      showFind &&
-      findTerm &&
-      fileMatches.settled &&
-      activeMatch?.offset !== undefined
-    ) {
-      ensureFileOffsetLoaded(activeMatch.offset);
+    if (!showFind || !findTerm || activeMatch === undefined) return;
+    if (activeMatch.offset !== undefined) {
+      if (!fileMatches.settled) return;
+      scrollToIndexRef.current?.(fileOffsetToRowIndex(activeMatch.offset));
+    } else {
+      const index = rowIndexById(activeMatch.id);
+      if (index !== undefined) scrollToIndexRef.current?.(index);
     }
   }, [
     showFind,
     findTerm,
     fileMatches.settled,
     activeMatch,
-    ensureFileOffsetLoaded,
+    fileOffsetToRowIndex,
+    rowIndexById,
   ]);
 
   const closeFind = useCallback(() => {
@@ -443,7 +446,10 @@ export const LogListGrid: FC<LogListGridProps> = ({
       )}
       <div className={clsx(gridStyles.gridContainer)}>
         <DataGrid<LogListRow>
-          data={rows}
+          rowCount={rowCount}
+          rowAt={rowAt}
+          onVisibleRangeChange={onVisibleRangeChange}
+          scrollToIndexRef={scrollToIndexRef}
           columns={columns}
           columnVisibility={visibility}
           sorting={sorting}
@@ -458,9 +464,6 @@ export const LogListGrid: FC<LogListGridProps> = ({
           selectedRowId={activeMatchId ?? persistedSelectedId}
           onSelectedRowChange={handleSelectedRowChange}
           onRowActivate={handleRowActivate}
-          hasMore={hasMoreRows}
-          onScrollNearEnd={fetchMoreRows}
-          autoFetchPaused={autoFetchPaused}
           autoFocus
           ariaLabel="Evaluation logs"
           loading={totalRowCount === 0 && busy}

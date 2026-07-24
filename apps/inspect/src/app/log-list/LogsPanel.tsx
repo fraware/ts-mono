@@ -218,11 +218,10 @@ export const LogsPanel: FC<LogsPanelProps> = ({
   const listBusy = busy || listData.pending || overviewQuery.loading;
   const error = sync.error ?? overviewQuery.error ?? listData.error;
   // Cold vs warm failure: with no rows to show the error replaces the panel
-  // body; with rows retained (earlier pages, the previous filter's
-  // placeholder, or overlay folders) the grid stays mounted — scroll,
-  // selection, and find state survive — and the failure surfaces as a
-  // banner above it.
-  const coldError = error !== undefined && listData.rows.length === 0;
+  // body; with rows retained (observed pages, the held previous window, or
+  // overlay folders) the grid stays mounted — scroll, selection, and find
+  // state survive — and the failure surfaces as a banner above it.
+  const coldError = error !== undefined && listData.rowCount === 0;
   const handleErrorRetry = useCallback(() => {
     // Re-run everything that feeds the panel — the listing sync (network)
     // and the row/overview reads (local): invalidation refetches errored
@@ -396,7 +395,12 @@ export const LogsPanel: FC<LogsPanelProps> = ({
                 (term + matches) belong to one scope and reset together. */}
               <LogListGrid
                 key={scopeKey ?? "pending"}
-                rows={listData.rows}
+                rowCount={listData.rowCount}
+                rowAt={listData.rowAt}
+                overlayRows={listData.overlayRows}
+                fileOffsetToRowIndex={listData.fileOffsetToRowIndex}
+                rowIndexById={listData.rowIndexById}
+                onVisibleRangeChange={listData.onVisibleRangeChange}
                 totalRowCount={totalRowCount}
                 sorting={listData.sorting}
                 columnFilters={listData.columnFilters}
@@ -407,10 +411,6 @@ export const LogsPanel: FC<LogsPanelProps> = ({
                 mode={mode}
                 busy={listBusy}
                 listing={listing}
-                hasMoreRows={listData.hasMoreRows}
-                fetchMoreRows={listData.fetchMoreRows}
-                ensureFileOffsetLoaded={listData.ensureFileOffsetLoaded}
-                autoFetchPaused={listData.autoFetchPaused}
               />
             </div>
           </div>

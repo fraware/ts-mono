@@ -1,17 +1,14 @@
 import type { SortingState } from "@tanstack/react-table";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 import type { Condition, OrderByModel } from "@tsmono/inspect-common/query";
 import type { ColumnFilter } from "@tsmono/inspect-components/columnFilter";
 
 import { useLogsListing } from "../../../state/hooks";
 import { useKeyedMemo } from "../../shared/useKeyedMemo";
-import {
-  applyListingQuery,
-  mergeSortedRows,
-} from "../listing/applyListingQuery";
+import { applyListingQuery } from "../listing/applyListingQuery";
 import { combineFilters } from "../listing/combineFilters";
-import { compareByOrderBy } from "../listing/evaluator";
+import { buildMergedListingIndex } from "../listing/mergedListingIndex";
 import type {
   FilterTypeAccessor,
   ValueAccessor,
@@ -20,6 +17,8 @@ import type {
 import {
   sortingStateToOrderBy,
   useDatabaseLogsListingQuery,
+  useLogsListingOverlayOffsets,
+  type ListingVisibleRange,
   type LogsListingDescriptor,
 } from "../listing/useLogsListingQuery";
 import { FolderLogItem, PendingTaskItem } from "../LogItem";
@@ -28,10 +27,11 @@ import { LogListRow } from "./columns/types";
 import { buildLogListRow } from "./logListRow";
 
 const kNoRows: LogListRow[] = [];
+const kNoOffsets: number[] = [];
 
 /** Pending rows minus the tasks that already have a file row (pending row
  *  ids are task ids; file rows carry their record's task_id). `fileRows` is
- *  only the loaded page window under pagination, so the snapshot-scoped
+ *  only the observed page window under pagination, so the snapshot-scoped
  *  `universeTaskIds` carries the tasks whose files sit on unloaded pages;
  *  the window rows still count too — their bulkGot records can be fresher
  *  than the snapshot (e.g. a preview landing task_id after the scan). */
@@ -52,8 +52,8 @@ export const dropSettledPendingRows = (
 
 interface UseLogListDataParams {
   /** Presentation rows with no database record: folders (pinned) and
-   *  pending tasks (merged into the queried page as a sorted overlay).
-   *  File rows come from the listing query below. */
+   *  pending tasks (inserted into the file universe at their snapshot
+   *  offsets). File rows come from the listing query below. */
   overlayItems: Array<FolderLogItem | PendingTaskItem>;
   /** Per-scope sorting/filters are read under this key (`undefined` while
    *  logDir is still hydrating — defaults apply, nothing is written). */
@@ -67,10 +67,25 @@ interface UseLogListDataParams {
 }
 
 export interface LogListData {
-  /** Display rows: folders pinned on top, then the filtered+sorted files. */
-  rows: LogListRow[];
-  /** Folders + matching files (reflects any active filter) — the footer
-   *  count. */
+  /** Total rows the grid virtualizes: folders pinned on top, then the whole
+   *  filtered file universe (loaded or not) with pending rows inserted at
+   *  their universe offsets. */
+  rowCount: number;
+  /** Resolve a merged row index to its display row; `undefined` while the
+   *  index's page is unloaded (the grid renders a skeleton). */
+  rowAt: (index: number) => LogListRow | undefined;
+  /** Merged row index of a file's snapshot offset (find-match jumps). */
+  fileOffsetToRowIndex: (offset: number) => number;
+  /** Merged row index of an overlay (folder / pending) row id, if any —
+   *  overlay rows have no snapshot offset, so jumps address them by id. */
+  rowIndexById: (id: string) => number | undefined;
+  /** Overlay rows (folders + visible pendings) for the find band's local
+   *  matching — they have no listing record to match against. */
+  overlayRows: LogListRow[];
+  /** Feed the grid's rendered row range back to the page queries. */
+  onVisibleRangeChange: (range: ListingVisibleRange) => void;
+  /** Folders + matching files + pendings (reflects any active filter) —
+   *  the footer count. */
   filteredCount: number;
   /** The sorting/filters the query ran under — the grid's controlled state,
    *  passed through so grid and query can't diverge. */
@@ -83,30 +98,19 @@ export interface LogListData {
   orderBy: OrderByModel[];
   /** The listing query has no result to show yet (first read in flight). */
   pending: boolean;
-  /** The listing read failed. Warm — `rows` still carries the retained
-   *  pages (see `DatabaseLogsListing.result`) plus overlay items — so keep
-   *  rendering the list and surface this beside it; only when `rows` is
-   *  empty is there nothing to show (render an error state rather than an
-   *  empty-looking list). */
+  /** The listing read failed. Warm — the observed pages (or the held
+   *  previous window) still render — so keep the grid mounted and surface
+   *  this beside it; only when `rowCount` is 0 is there nothing to show. */
   error: Error | undefined;
-  /** More file rows exist beyond the loaded pages — gates the grid's
-   *  scroll-near-end fetch trigger. */
-  hasMoreRows: boolean;
-  /** Load the next page of file rows (in-flight-safe). */
-  fetchMoreRows: () => void;
-  /** Load pages until a snapshot offset is represented in `rows`. */
-  ensureFileOffsetLoaded: (offset: number) => void;
-  /** Pause the grid's commit-driven fetch chaining — a chained fetch can't
-   *  make progress right now (see `DatabaseLogsListing.autoFetchPaused`). */
-  autoFetchPaused: boolean;
 }
 
 /**
  * The log-list data pipeline: run the scope's persisted sorting/filters as a
- * listing query against the listing source (IndexedDB in dir mode), shape the
- * resulting records into grid rows, merge in transient rows (pending tasks),
- * and pin folders on top. Called by LogsPanel; the grid just renders the
- * result.
+ * listing query against the listing source (IndexedDB in dir mode), expose
+ * the merged universe as index-addressed rows (folders pinned, pending rows
+ * inserted at their snapshot offsets, unloaded pages as `undefined`), and
+ * feed the grid's rendered range back into the page queries. Called by
+ * LogsPanel; the grid just renders the result.
  */
 export const useLogListData = ({
   overlayItems,
@@ -160,12 +164,9 @@ export const useLogListData = ({
   const filter = useMemo(() => combineFilters(columnFilters), [columnFilters]);
 
   const {
-    result: { data: result, loading: pending },
+    result: { data: listingWindow, loading: pending },
     error,
-    hasNextPage,
-    fetchNextPage,
-    ensureOffsetLoaded,
-    autoFetchPaused,
+    setVisibleRange,
   } = useDatabaseLogsListingQuery<LogListRow>({
     filter,
     orderBy,
@@ -179,31 +180,31 @@ export const useLogListData = ({
   // The pending anti-join input (overview.taskIds) and the file rows are two
   // independent async reads of the same store, so a settle-order skew can
   // briefly keep a task's pending row while its first log file already
-  // renders. Re-derive against the queried page: a task with a file row is
+  // renders. Re-derive against the queried pages: a task with a file row is
   // not pending, whatever the overview's snapshot said.
   const visiblePendingRows = useMemo(
     () =>
       dropSettledPendingRows(
         pendingRows,
-        result?.items ?? kNoRows,
-        result?.universe_task_ids
+        listingWindow?.loadedRows ?? kNoRows,
+        listingWindow?.universe_task_ids
       ),
-    [pendingRows, result]
+    [pendingRows, listingWindow]
   );
 
   // Pending tasks have no database record: run the same query over them in
-  // memory and merge the (small) result into the query's page.
-  const overlay = useMemo(
+  // memory (filter + sort), then insert the survivors into the universe.
+  const pendingOverlayRows = useMemo(
     () =>
       visiblePendingRows.length === 0
-        ? undefined
+        ? kNoRows
         : applyListingQuery(visiblePendingRows, {
             filter,
             orderBy,
             getValue,
             getComparator,
             getFilterType,
-          }),
+          }).items,
     [
       visiblePendingRows,
       filter,
@@ -214,36 +215,108 @@ export const useLogListData = ({
     ]
   );
 
-  const files = useMemo(() => {
-    const base = result?.items ?? kNoRows;
-    if (!overlay) return base;
-    const compare =
-      orderBy.length > 0
-        ? compareByOrderBy(orderBy, getValue, getComparator)
-        : undefined;
-    return mergeSortedRows(base, overlay.items, compare);
-  }, [result, overlay, orderBy, getValue, getComparator]);
+  // Exact universe insertion offsets under an active sort (positions the
+  // overlay against snapshot order, not the loaded window). Unsorted
+  // listings append overlays after the whole universe — no read needed.
+  const sortedOverlayOffsets = useLogsListingOverlayOffsets({
+    filter,
+    orderBy,
+    getValue,
+    getComparator,
+    getFilterType,
+    accessorsKey,
+    listing,
+    rows: pendingOverlayRows,
+  });
 
-  const rows = useMemo(
-    () => (folders.length > 0 ? [...folders, ...files] : files),
-    [folders, files]
+  const totalCount = listingWindow?.total_count ?? 0;
+  const overlayOffsets = useMemo(() => {
+    if (pendingOverlayRows.length === 0) return kNoOffsets;
+    // Append at the end: the unsorted contract, and the interim placement
+    // while a sorted read is still in flight (or sized for a stale set).
+    if (
+      orderBy.length === 0 ||
+      sortedOverlayOffsets === undefined ||
+      sortedOverlayOffsets.length !== pendingOverlayRows.length
+    ) {
+      return pendingOverlayRows.map(() => totalCount);
+    }
+    return sortedOverlayOffsets;
+  }, [pendingOverlayRows, orderBy, sortedOverlayOffsets, totalCount]);
+
+  const mergedIndex = useMemo(
+    () => buildMergedListingIndex(folders.length, totalCount, overlayOffsets),
+    [folders.length, totalCount, overlayOffsets]
+  );
+
+  const rowAt = useCallback(
+    (index: number): LogListRow | undefined => {
+      const slot = mergedIndex.at(index);
+      switch (slot.kind) {
+        case "folder":
+          return folders[slot.position];
+        case "overlay":
+          return pendingOverlayRows[slot.position];
+        case "file":
+          return listingWindow?.rowAt(slot.position);
+      }
+    },
+    [mergedIndex, folders, pendingOverlayRows, listingWindow]
+  );
+
+  const fileOffsetToRowIndex = useCallback(
+    (offset: number) => mergedIndex.indexOfFileOffset(offset),
+    [mergedIndex]
+  );
+
+  const rowIndexById = useCallback(
+    (id: string): number | undefined => {
+      const folderIndex = folders.findIndex((row) => row.id === id);
+      if (folderIndex !== -1) return folderIndex;
+      const overlayIndex = pendingOverlayRows.findIndex((row) => row.id === id);
+      if (overlayIndex !== -1) return mergedIndex.indexOfOverlay(overlayIndex);
+      return undefined;
+    },
+    [folders, pendingOverlayRows, mergedIndex]
+  );
+
+  const overlayRows = useMemo(
+    () =>
+      folders.length === 0
+        ? pendingOverlayRows
+        : [...folders, ...pendingOverlayRows],
+    [folders, pendingOverlayRows]
+  );
+
+  // Merged row indices → file-universe offsets, conservatively (over-cover
+  // by the overlay counts; the page queries add their own overscan anyway).
+  const folderCount = folders.length;
+  const overlayCount = pendingOverlayRows.length;
+  const onVisibleRangeChange = useCallback(
+    (range: ListingVisibleRange) => {
+      setVisibleRange({
+        start: Math.max(0, range.start - folderCount - overlayCount),
+        end: Math.max(0, range.end - folderCount),
+      });
+    },
+    [setVisibleRange, folderCount, overlayCount]
   );
 
   return {
-    rows,
+    rowCount: mergedIndex.rowCount,
+    rowAt,
+    fileOffsetToRowIndex,
+    rowIndexById,
+    overlayRows,
+    onVisibleRangeChange,
     // Footer count over the whole filtered universe, not the loaded pages:
     // total_count comes from the snapshot's key list.
-    filteredCount:
-      folders.length + (result?.total_count ?? 0) + (overlay?.total_count ?? 0),
+    filteredCount: folderCount + totalCount + overlayCount,
     sorting,
     columnFilters,
     filter,
     orderBy,
     pending,
     error,
-    hasMoreRows: hasNextPage,
-    fetchMoreRows: fetchNextPage,
-    ensureFileOffsetLoaded: ensureOffsetLoaded,
-    autoFetchPaused,
   };
 };
