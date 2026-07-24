@@ -56,6 +56,10 @@ const kFetchThreshold = 2000;
 // Tall enough to host a rotated score-column label (≈92px of vertical
 // extent for a 130px label at 45°) plus breathing room.
 const kRotatedHeaderHeight = 115;
+// Windowed mode rounds the table's data window out to this many rows so its
+// identity (and TanStack's Row identities, which drive GridRow's memo) only
+// changes when the viewport crosses a chunk boundary, not per scrolled row.
+const kWindowChunk = 50;
 
 /** Full-text header tooltip (native `title`), shown on hover — useful when the
  *  header label is truncated (regular ellipsis or a narrow rotated label).
@@ -135,10 +139,33 @@ const kAfterRotatedGap = 24;
 // invisible.
 const kFitSlack = 4;
 
+/** A rendered (virtualized, overscan included) row-index range. */
+export interface VisibleRowRange {
+  /** First rendered row index (inclusive). */
+  start: number;
+  /** Last rendered row index (inclusive). */
+  end: number;
+}
+
 export interface DataGridProps<TRow> {
-  data: TRow[];
+  /** Complete row list (dense mode). Omit in windowed mode
+   *  (`rowCount`/`rowAt`), where rows resolve per rendered index instead. */
+  data?: TRow[];
   columns: ExtendedColumnDef<TRow>[];
   getRowId: (row: TRow) => string;
+  /** Windowed (range-driven) mode: the total row count to virtualize. The
+   *  scrollbar spans all `rowCount` rows whether or not they are loaded. */
+  rowCount?: number;
+  /** Windowed mode: resolve a row index to its row, or `undefined` while
+   *  its page is unloaded — those indices render as skeleton rows. */
+  rowAt?: (index: number) => TRow | undefined;
+  /** Reports the rendered row-index range (the virtualizer's window,
+   *  overscan included) whenever it changes — windowed mode's fetch driver. */
+  onVisibleRangeChange?: (range: VisibleRowRange) => void;
+  /** Imperative jump handle: assigned a `scrollToIndex` function while the
+   *  grid is mounted. Windowed-mode jumps can target rows that aren't
+   *  loaded yet, which the id-based selection scroll can't express. */
+  scrollToIndexRef?: RefObject<((index: number) => void) | null>;
   /** Controlled column visibility (keyed by column id). Owned by the caller. */
   columnVisibility?: VisibilityState;
   /** Controlled sort state. Rows arrive already sorted (manualSorting); this
@@ -225,10 +252,16 @@ export interface DataGridProps<TRow> {
  * double-click auto-size), pinning, reordering, and find are wired up —
  * see design/migration/archive/loglistgrid-tanstack.md.
  */
+const kEmptyData: never[] = [];
+
 export function DataGrid<TRow>({
-  data,
+  data = kEmptyData,
   columns,
   getRowId,
+  rowCount,
+  rowAt,
+  onVisibleRangeChange,
+  scrollToIndexRef,
   columnVisibility,
   sorting,
   onSortingChange,
@@ -593,12 +626,104 @@ export function DataGrid<TRow>({
     [handleColumnSizingChange]
   );
 
+  // Windowed (range-driven) mode: the virtualizer spans `rowCount` rows and
+  // the table holds only the rendered window's loaded rows; unloaded indices
+  // render as skeletons. Dense mode virtualizes `data` as before.
+  const windowed = rowAt !== undefined && rowCount !== undefined;
+  const totalCount = windowed ? rowCount : data.length;
+
+  // The sticky header occupies layout space at the top of the scroll
+  // container, so the virtualized rows start `headerHeight` px down. Two knobs
+  // keep scrollToIndex in the same coordinate space as the DOM:
+  //  - scrollMargin shifts the virtual offsets down by the header, so a row
+  //    aligned to the bottom ("end"/"auto") isn't a header's-height too low
+  //    (which clipped it at the bottom edge);
+  //  - scrollPaddingStart reserves the header's height when aligning to the
+  //    top ("start"/"auto"), so a row scrolled in from above sits below the
+  //    sticky header instead of behind it.
+  // Built before the table because windowed mode derives the table's data
+  // from the rendered window.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: totalCount,
+    getScrollElement: () => containerRef.current,
+    estimateSize: () => rowHeight,
+    overscan: 12,
+    scrollMargin: effectiveHeaderHeight,
+    scrollPaddingStart: effectiveHeaderHeight,
+    getItemKey: (index) => {
+      const row = windowed ? rowAt(index) : data[index];
+      return row === undefined ? index : getRowId(row);
+    },
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const totalSize = rowVirtualizer.getTotalSize();
+  const renderedStart = virtualItems[0]?.index ?? 0;
+  const renderedEnd = virtualItems.at(-1)?.index ?? -1;
+
+  // Window bounds rounded out to a chunk so the table data (and therefore
+  // TanStack's Row identities, which drive GridRow's memo) stay stable
+  // across small scrolls instead of rebuilding per entering row.
+  const windowStart = windowed
+    ? Math.floor(renderedStart / kWindowChunk) * kWindowChunk
+    : 0;
+  const windowEnd = windowed
+    ? Math.min(
+        totalCount - 1,
+        Math.ceil((renderedEnd + 1) / kWindowChunk) * kWindowChunk - 1
+      )
+    : renderedEnd;
+
+  // Windowed table data: the window's loaded rows (dense, window order) plus
+  // the index mappings between absolute row indices and table positions.
+  const { tableData, windowIndexByAbsolute, absoluteIndices } = useMemo(() => {
+    if (!windowed || rowAt === undefined) {
+      return {
+        tableData: data,
+        windowIndexByAbsolute: undefined,
+        absoluteIndices: undefined,
+      };
+    }
+    const tableData: TRow[] = [];
+    const windowIndexByAbsolute = new Map<number, number>();
+    const absoluteIndices: number[] = [];
+    for (let index = windowStart; index <= windowEnd; index++) {
+      const row = rowAt(index);
+      if (row === undefined) continue;
+      windowIndexByAbsolute.set(index, tableData.length);
+      absoluteIndices.push(index);
+      tableData.push(row);
+    }
+    return { tableData, windowIndexByAbsolute, absoluteIndices };
+  }, [windowed, data, rowAt, windowStart, windowEnd]);
+
+  // Report the rendered range (not the chunked window) — the fetch driver
+  // in windowed mode. Nothing rendered (zero-layout container, e.g. a
+  // hidden webview tab) reports nothing, so an unseen grid only ever holds
+  // its initial page.
+  useEffect(() => {
+    if (onVisibleRangeChange === undefined || renderedEnd < renderedStart) {
+      return;
+    }
+    onVisibleRangeChange({ start: renderedStart, end: renderedEnd });
+  }, [onVisibleRangeChange, renderedStart, renderedEnd]);
+
+  useEffect(() => {
+    if (scrollToIndexRef === undefined) return;
+    scrollToIndexRef.current = (index: number) => {
+      rowVirtualizer.scrollToIndex(index, { align: "auto" });
+    };
+    return () => {
+      scrollToIndexRef.current = null;
+    };
+  }, [scrollToIndexRef, rowVirtualizer]);
+
   // useReactTable returns unmemoizable functions
   // https://github.com/TanStack/table/issues/5567
   // https://github.com/facebook/react/issues/33057
-  // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
-    data,
+    data: tableData,
     columns: columns as ColumnDef<TRow>[],
     getCoreRowModel: getCoreRowModel(),
     getRowId,
@@ -637,25 +762,6 @@ export function DataGrid<TRow>({
   // unrelated grid-state changes.
   const visibleColumns = table.getVisibleLeafColumns();
 
-  // The sticky header occupies layout space at the top of the scroll
-  // container, so the virtualized rows start `headerHeight` px down. Two knobs
-  // keep scrollToIndex in the same coordinate space as the DOM:
-  //  - scrollMargin shifts the virtual offsets down by the header, so a row
-  //    aligned to the bottom ("end"/"auto") isn't a header's-height too low
-  //    (which clipped it at the bottom edge);
-  //  - scrollPaddingStart reserves the header's height when aligning to the
-  //    top ("start"/"auto"), so a row scrolled in from above sits below the
-  //    sticky header instead of behind it.
-  const rowVirtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => containerRef.current,
-    estimateSize: () => rowHeight,
-    overscan: 12,
-    scrollMargin: effectiveHeaderHeight,
-    scrollPaddingStart: effectiveHeaderHeight,
-    getItemKey: (index) => rows[index]?.id ?? String(index),
-  });
-
   // Keep the selected row visible when it changes from the outside. `rows`
   // is a read, not a trigger: during a live eval every poll tick lands a new
   // rows identity, and re-scrolling then would yank the viewport back to the
@@ -672,10 +778,12 @@ export function DataGrid<TRow>({
     if (scrolledToSelectedRef.current === selectedId) return;
     const index = rows.findIndex((r) => r.id === selectedId);
     if (index !== -1) {
-      rowVirtualizer.scrollToIndex(index, { align: "auto" });
+      rowVirtualizer.scrollToIndex(absoluteIndices?.[index] ?? index, {
+        align: "auto",
+      });
       scrolledToSelectedRef.current = selectedId;
     }
-  }, [selectedId, rows, rowVirtualizer]);
+  }, [selectedId, rows, absoluteIndices, rowVirtualizer]);
 
   const handleRowClick = useCallback(
     (e: MouseEvent<HTMLDivElement>, rowId: string, row: TRow) => {
@@ -707,16 +815,22 @@ export function DataGrid<TRow>({
         return;
       }
 
-      const rowCount = rows.length;
-      if (rowCount === 0) return;
+      if (totalCount === 0) return;
 
-      const currentIndex = selectedId
+      // Navigation happens in absolute row indices; in windowed mode the
+      // table only holds the rendered window, so map through the window.
+      const currentWindowIndex = selectedId
         ? rows.findIndex((r) => r.id === selectedId)
         : -1;
+      const currentIndex =
+        currentWindowIndex === -1
+          ? -1
+          : (absoluteIndices?.[currentWindowIndex] ?? currentWindowIndex);
 
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        const row = currentIndex === -1 ? undefined : rows[currentIndex];
+        const row =
+          currentWindowIndex === -1 ? undefined : rows[currentWindowIndex];
         if (row) onRowActivate(row.original);
         return;
       }
@@ -726,25 +840,42 @@ export function DataGrid<TRow>({
         metaKey: e.metaKey,
         ctrlKey: e.ctrlKey,
         currentIndex,
-        rowCount,
+        rowCount: totalCount,
         pageJump: kPageJump,
       });
       if (target === null) return;
       e.preventDefault();
       if (target === currentIndex) return;
 
-      const targetRow = rows[target];
-      if (!targetRow) return;
+      const targetWindowIndex = windowIndexByAbsolute
+        ? windowIndexByAbsolute.get(target)
+        : target;
+      const targetRow =
+        targetWindowIndex === undefined ? undefined : rows[targetWindowIndex];
+      if (!targetRow) {
+        // Windowed mode: the target row is unloaded or outside the rendered
+        // window (Home/End, a long PgDn). Move the viewport there; selection
+        // follows on the next keypress once the row renders.
+        if (windowed) rowVirtualizer.scrollToIndex(target, { align: "auto" });
+        return;
+      }
       // The selection change drives the scroll-into-view effect below; doing
       // the scroll here too is redundant (react-virtual keeps only the last
       // pending scrollToIndex, so the effect's call wins anyway).
       selectRow(targetRow.id, targetRow.original);
     },
-    [rows, selectedId, onRowActivate, selectRow]
+    [
+      rows,
+      selectedId,
+      onRowActivate,
+      selectRow,
+      totalCount,
+      windowed,
+      absoluteIndices,
+      windowIndexByAbsolute,
+      rowVirtualizer,
+    ]
   );
-
-  const virtualItems = rowVirtualizer.getVirtualItems();
-  const totalSize = rowVirtualizer.getTotalSize();
 
   // Infinite scroll (ported from scout's DataGrid): ask for the next page
   // when the viewport nears the bottom of the loaded rows.
@@ -799,7 +930,7 @@ export function DataGrid<TRow>({
   // (React only rewrites the text node — and thus only announces — on change).
   const statusMessage = useMemo(() => {
     if (loading) return "Loading…";
-    if (rows.length === 0) return emptyMessage;
+    if (totalCount === 0) return emptyMessage;
     const active = sorting ?? [];
     const sortDesc =
       active.length > 0
@@ -807,11 +938,11 @@ export function DataGrid<TRow>({
             .map((s) => `${s.id} ${s.desc ? "descending" : "ascending"}`)
             .join(", ")}`
         : "";
-    return `${rows.length} ${rows.length === 1 ? "row" : "rows"}${sortDesc}`;
-  }, [loading, rows.length, emptyMessage, sorting]);
+    return `${totalCount} ${totalCount === 1 ? "row" : "rows"}${sortDesc}`;
+  }, [loading, totalCount, emptyMessage, sorting]);
 
   // aria-rowcount includes the header row; data rows are indexed from 2.
-  const ariaRowCount = rows.length + 1;
+  const ariaRowCount = totalCount + 1;
   const ariaColCount = visibleColumns.length;
 
   return (
@@ -1045,8 +1176,27 @@ export function DataGrid<TRow>({
           role="rowgroup"
         >
           {virtualItems.map((virtualRow) => {
-            const row = rows[virtualRow.index];
-            if (!row) return null;
+            const windowIndex = windowIndexByAbsolute
+              ? windowIndexByAbsolute.get(virtualRow.index)
+              : virtualRow.index;
+            const row =
+              windowIndex === undefined ? undefined : rows[windowIndex];
+            if (!row) {
+              // Windowed mode: the index's page hasn't loaded — hold its
+              // position with a skeleton so the scrollbar spans the universe.
+              if (!windowed) return null;
+              return (
+                <SkeletonRow
+                  key={virtualRow.key}
+                  ariaRowIndex={virtualRow.index + 2}
+                  visibleColumns={visibleColumns}
+                  rowHeight={rowHeight}
+                  width={totalWidth + gapExtra}
+                  top={virtualRow.start - effectiveHeaderHeight}
+                  afterRotatedIds={afterRotatedIds}
+                />
+              );
+            }
             return (
               <GridRow
                 key={row.id}
@@ -1069,7 +1219,7 @@ export function DataGrid<TRow>({
           })}
         </div>
       </div>
-      {rows.length === 0 && (
+      {totalCount === 0 && (
         <div className={styles.empty}>
           {loading ? "Loading…" : emptyMessage}
         </div>
@@ -1160,6 +1310,62 @@ function GridRowInner<TRow>({
  * is unchanged. React.memo erases generics, so restore the signature.
  */
 const GridRow = memo(GridRowInner) as typeof GridRowInner;
+
+interface SkeletonRowProps<TRow> {
+  ariaRowIndex: number;
+  visibleColumns: Column<TRow, unknown>[];
+  rowHeight: number;
+  width: number;
+  top: number;
+  afterRotatedIds: ReadonlySet<string>;
+}
+
+function SkeletonRowInner<TRow>({
+  ariaRowIndex,
+  visibleColumns,
+  rowHeight,
+  width,
+  top,
+  afterRotatedIds,
+}: SkeletonRowProps<TRow>): ReactElement {
+  return (
+    <div
+      className={styles.row}
+      style={{ height: rowHeight, width, transform: `translateY(${top}px)` }}
+      role="row"
+      aria-rowindex={ariaRowIndex}
+      aria-busy="true"
+    >
+      {visibleColumns.map((column, colIndex) => {
+        const pinned = column.getIsPinned() === "left";
+        return (
+          <div
+            key={column.id}
+            className={clsx(styles.cell, pinned && styles.cellPinned)}
+            style={{
+              width:
+                column.getSize() +
+                (afterRotatedIds.has(column.id) ? kAfterRotatedGap : 0),
+              ...(pinned && {
+                position: "sticky" as const,
+                left: column.getStart("left"),
+                zIndex: 1,
+              }),
+            }}
+            role="gridcell"
+            aria-colindex={colIndex + 1}
+          >
+            <span className={styles.skeletonBar} aria-hidden="true" />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Placeholder for a row whose page hasn't loaded (windowed mode): keeps the
+ *  index's position and column layout while the page fetch is in flight. */
+const SkeletonRow = memo(SkeletonRowInner) as typeof SkeletonRowInner;
 
 /**
  * Rotated (compact score) header cell. The 45° label hosts the text, sort

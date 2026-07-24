@@ -501,3 +501,25 @@
   top: 2px;
   bottom: 2px;
 }
+
+/* Windowed mode's unloaded-row placeholder: a muted bar per cell, gently
+ * pulsing while the row's page loads. */
+.skeletonBar {
+  display: inline-block;
+  width: 60%;
+  max-width: 140px;
+  height: 9px;
+  border-radius: 4px;
+  background: var(--bs-tertiary-bg);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
