@@ -205,6 +205,93 @@ hold needs to live at the listing level: keep the previous
 (filter, orderBy)'s rendered window + total on screen until the new
 snapshot's first observed pages land, then swap atomically.
 
+### Amendment: the settled design (2026-07-24, built)
+
+**The hold.** The hook keeps the last *fully settled* window — the
+assembled `(rows-by-offset, total_count)` of the most recent
+`(universe, accessorsKey, filter, orderBy, source)` key whose every
+range-needed page had data — in a ref beside the live `useQueries`
+results. Publication rule, evaluated per render:
+
+- Every needed page of the current key has data → publish live (and the
+  ref updates to it). This is also the steady state during invalidation
+  refetches, because react-query retains page data across a refetch.
+- Some needed page of the current key has no data yet, and the held
+  window is from a *different* key in the *same* universe → publish the
+  held window (rows **and** its total, so the scrollbar doesn't jump).
+  This is the re-filter/re-sort/schema-arrival hold. The first render
+  where the new key's needed pages are all settled swaps rows + total in
+  one commit — the atomic swap.
+- Same key, some needed page not yet loaded (scroll into unloaded
+  territory) → publish live: loaded rows render, unloaded ones are
+  skeletons. The hold never masks scroll-driven page loads.
+- No held window from this universe and nothing loaded → `loading` (a
+  universe switch must not leak another universe's rows, exactly like
+  the old placeholder guard).
+
+A settled *error* under the new key leaves the hold in place (matching
+the old warm-failure behavior: retained rows keep rendering) and surfaces
+through `error` beside the data; recovery is the standard invalidation.
+One deliberate consequence: a deep-scrolled re-filter can swap into a
+range past the new (smaller) universe's end — those pages settle empty
+with the correct total, the virtualizer clamps, and the top pages then
+load as skeletons fill. Brief, self-correcting, and no worse than the
+old clamp-to-shrunk-content behavior.
+
+**The replaced hook contract.** `useDatabaseLogsListingQuery` returns
+`{ result, error, setVisibleRange }`:
+
+- `result` is `AsyncData<LogsListingWindow>`: `total_count`,
+  `universe_task_ids`, `rowAt(offset)` (undefined = unloaded → skeleton),
+  and `loadedRows` (the observed pages' rows, for window-scoped
+  derivations like the pending anti-join). Identity is stable until an
+  observed page's data actually changes, so the grid doesn't re-render
+  per page fetch.
+- `setVisibleRange` feeds the virtualizer's rendered row range (mapped to
+  file-universe offsets by `useLogListData`) into the hook; needed page
+  indices are the range ± `kVisibleRangeOverscanRows`, one `useQueries`
+  entry per page keyed `(universe, accessorsKey, filter, orderBy, source,
+  "page", pageIndex)`.
+- `hasNextPage`/`fetchNextPage` and the grid's scroll-near-end trigger are
+  gone — range observation *is* the fetch driver. `autoFetchPaused` is
+  gone with them (it existed to stop commit-driven fetch chaining, and
+  there is no chaining anymore); DataGrid's near-end machinery
+  (`checkScrollNearEnd`, the commit re-check, the zero-layout guard, the
+  layout-arrival ResizeObserver) is deleted. Scout keeps its own older
+  copy — the hoist-to-shared-package option from the review findings is
+  moot for inspect's grid now.
+- `ensureOffsetLoaded` is gone: a jump is `scrollToIndex` (DataGrid
+  exposes an imperative `scrollToIndexRef`), the range moves, pages load.
+  Find navigates by mapping a match's snapshot offset to a grid row index
+  (`fileOffsetToRowIndex`).
+- The error banner's settled-error state is the first error among the
+  *observed* page queries (each settles independently under the client's
+  default retry policy; the shared snapshot rejection propagates to every
+  observed page, so one failed build still surfaces).
+
+**Overlay (pending-row) positioning** — the designated fix for the
+position-drift finding. Pending rows get exact universe offsets from a
+new read, `readLogsListingOverlayOffsets`: for each overlay row, the
+count of snapshot-member universe rows sorting ≤ it under the active
+plan (ties keep base rows first, `mergeSortedRows`' contract), computed
+from the same snapshot + scan join the match read uses and cached as a
+listing-keyed query (so the root invalidation keeps it in sync). With no
+sort the offsets are simply `total_count` — the unsorted listing shows
+transient rows after all files (the documented `mergeSortedRows`
+behavior, now applied to the whole universe rather than the loaded
+window). `useLogListData` merges folders (pinned), pending rows (at
+their offsets), and file pages into one index space:
+`rowAt(index)`/`fileOffsetToRowIndex(offset)` over
+`mergedPos(j) = clamp(offset_j) + j`. While the offsets query is in
+flight, pendings append at the end and converge when it lands.
+
+**Database→cache source flip** — fixed while re-keying, per the review
+finding. The cache path of `readLogsListingPage` now honors the cursor
+(slices via `pageRows`) and reports `universe_task_ids`, so a page read
+that dispatches to the cache mid-flight serves positionally correct rows
+instead of appending the whole listing; page query keys also carry the
+source slot, so a flip re-keys the window on the next render.
+
 Sequencing: independent of the samples halves, step 3, and step 7 — but
 do it *before* any step 5 feature. Each of those is a `scrollToIndex` on
 top of the rework; built on the sequential window instead, each would be
