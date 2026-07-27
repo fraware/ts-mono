@@ -95,22 +95,31 @@ export { imperativeLogData } from "./imperativeLogData";
 export {
   databaseLogsListingKey,
   databaseLogsListingKeyRoot,
-  databaseLogsListingSnapshotKey,
   invalidateDatabaseLogsListings,
   listingKeyUniverse,
 } from "./databaseListings";
 export {
+  createLogsListingData,
   readLogsListing,
-  readLogsListingMatches,
-  readLogsListingPage,
   readLogsOverview,
+  type LogsListingData,
+  type LogsListingFindQuery,
   type LogsListingMatch,
-  type LogsListingPageQuery,
   type LogsListingPageResult,
   type LogsListingSnapshot,
+  type LogsListingView,
   type LogsOverview,
   type LogsOverviewView,
 } from "./logsListingRead";
+export { evaluateCondition, compareByOrderBy } from "./listing/evaluator";
+export { createListingPlan } from "./listing/planner";
+export type {
+  FilterTypeAccessor,
+  ListingQuery,
+  LogsListingResult,
+  ValueAccessor,
+  ValueComparator,
+} from "./listing/types";
 export { useLogHeader, useLogFetchState } from "./log";
 export { type LogListingRow, useLogListing } from "./logListing";
 export { resolveLogKey } from "./logsContent";

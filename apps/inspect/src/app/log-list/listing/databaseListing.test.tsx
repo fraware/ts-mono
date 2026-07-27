@@ -4,13 +4,16 @@ import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { Column } from "@tsmono/inspect-common/query";
-import type { Condition } from "@tsmono/inspect-common/query";
-
-import type { Cursor } from "../../../client/database/listing";
 import type {
-  LogListingRow,
+  Condition,
+  OrderByModel,
+  Pagination,
+} from "@tsmono/inspect-common/query";
+
+import type {
+  LogsListingData,
+  LogsListingFindQuery,
   LogsListingMatch,
-  LogsListingPageQuery,
 } from "../../../log_data";
 
 import {
@@ -24,21 +27,15 @@ interface Row {
   [k: string]: unknown;
 }
 
-type ReadListingPage = <TRow>(
-  query: LogsListingPageQuery<TRow>,
-  page: { cursor?: Cursor | null; limit: number }
-) => Promise<{
-  items: TRow[];
-  total_count: number;
-  next_cursor: Cursor | null;
-}>;
-
 const holder = vi.hoisted(() => ({
   records: [] as { name: string; model?: string }[],
   read: vi.fn(),
   readMatches: vi.fn(),
 }));
 
+// The hooks import the query-key helpers from the barrel; mock it so the
+// jsdom test doesn't drag in the whole data layer (dexie et al). The read
+// seams themselves are injected through the descriptor's `data` object.
 vi.mock("../../../log_data", () => ({
   databaseLogsListingKeyRoot: ["log_data", "dexie-listing", "logs"],
   databaseLogsListingKey: (...parts: unknown[]) => [
@@ -48,12 +45,6 @@ vi.mock("../../../log_data", () => ({
     ...parts.map((part) => part ?? null),
   ],
   listingKeyUniverse: (queryKey: readonly unknown[]) => queryKey[3],
-  readLogsListingPage: (
-    ...args: Parameters<ReadListingPage>
-  ): ReturnType<ReadListingPage> =>
-    holder.read(...args) as ReturnType<ReadListingPage>,
-  readLogsListingMatches: (...args: unknown[]): Promise<LogsListingMatch[]> =>
-    holder.readMatches(...args) as Promise<LogsListingMatch[]>,
 }));
 
 const records = [
@@ -61,11 +52,51 @@ const records = [
   { name: "/logs/a.eval", model: "gpt-4" },
 ];
 
-const getValue = (row: Row, column: string): unknown => row[column];
-const toRow = (log: LogListingRow): Row | undefined =>
-  log.model === undefined
-    ? undefined
-    : { name: log.name, model: log.model ?? "" };
+// The seam double evaluates queries itself (the real evaluation lives
+// behind the data interface now): equality filters and single-column
+// string sorts cover what these tests exercise.
+const matchesFilter = (row: Row, filter?: Condition): boolean => {
+  if (!filter) return true;
+  if (filter.compound || filter.operator !== "=") {
+    throw new Error("unsupported filter in the seam double");
+  }
+  return row[filter.left] === filter.right;
+};
+
+const sortRows = (rows: Row[], orderBy?: OrderByModel[]): Row[] => {
+  if (!orderBy || orderBy.length === 0) return rows;
+  return [...rows].sort((a, b) => {
+    for (const { column, direction } of orderBy) {
+      const av = (a[column] as string | undefined) ?? "";
+      const bv = (b[column] as string | undefined) ?? "";
+      if (av === bv) continue;
+      const cmp = av < bv ? -1 : 1;
+      return direction === "DESC" ? -cmp : cmp;
+    }
+    return 0;
+  });
+};
+
+const shapedRows = (filter?: Condition, orderBy?: OrderByModel[]): Row[] =>
+  sortRows(
+    holder.records
+      .filter((record) => record.model !== undefined)
+      .map((record) => ({ name: record.name, model: record.model ?? "" }))
+      .filter((row) => matchesFilter(row, filter)),
+    orderBy
+  );
+
+const fakeData: LogsListingData<Row> = {
+  getPage: (filter, orderBy, pagination) =>
+    holder.read(filter, orderBy, pagination) as ReturnType<
+      LogsListingData<Row>["getPage"]
+    >,
+  getMatches: (filter, orderBy, find) =>
+    holder.readMatches(filter, orderBy, find) as Promise<LogsListingMatch[]>,
+  getOverview: () => {
+    throw new Error("not used by these hooks");
+  },
+};
 
 const listingParams = (overrides?: {
   filter?: Condition;
@@ -75,15 +106,11 @@ const listingParams = (overrides?: {
 }) => ({
   filter: overrides?.filter,
   orderBy: overrides?.orderBy,
-  getValue,
-  getComparator: () => undefined,
   accessorsKey: overrides?.accessorsKey ?? "",
   listing: {
-    logDir: "/logs",
-    prefix: "/logs",
     universe:
       overrides && "universe" in overrides ? overrides.universe : "logs::/logs",
-    toRow,
+    data: fakeData,
   },
 });
 
@@ -96,21 +123,20 @@ describe("useDatabaseLogsListingQuery", () => {
     });
     holder.records = records;
     holder.read.mockReset();
-    // The seam double: run the plan over the fake records and slice the
-    // requested page, like readLogsListingPage over the snapshot.
+    // The seam double: evaluate the query over the fake records and slice
+    // the requested page, like getPage over the snapshot.
     holder.read.mockImplementation(
       (
-        query: LogsListingPageQuery<Row>,
-        page: { cursor?: Cursor | null; limit: number }
+        filter: Condition | undefined,
+        orderBy: OrderByModel[] | undefined,
+        pagination: Pagination
       ) => {
-        const rows = holder.records
-          .map((record) => query.toRow(record as LogListingRow))
-          .filter((row): row is Row => row !== undefined)
-          .filter(query.plan.matches);
-        if (query.plan.compare) rows.sort(query.plan.compare);
+        const rows = shapedRows(filter, orderBy);
         const offset =
-          typeof page.cursor?.offset === "number" ? page.cursor.offset : 0;
-        const end = offset + page.limit;
+          typeof pagination.cursor?.offset === "number"
+            ? pagination.cursor.offset
+            : 0;
+        const end = offset + pagination.limit;
         return Promise.resolve({
           items: rows.slice(offset, end),
           total_count: rows.length,
@@ -269,14 +295,15 @@ describe("useDatabaseLogsListingQuery", () => {
   const pageByOne = () =>
     holder.read.mockImplementation(
       (
-        query: LogsListingPageQuery<Row>,
-        page: { cursor?: Cursor | null; limit: number }
+        filter: Condition | undefined,
+        orderBy: OrderByModel[] | undefined,
+        pagination: Pagination
       ) => {
-        const rows = holder.records
-          .map((record) => query.toRow(record as LogListingRow))
-          .filter((row): row is Row => row !== undefined);
+        const rows = shapedRows(filter, orderBy);
         const offset =
-          typeof page.cursor?.offset === "number" ? page.cursor.offset : 0;
+          typeof pagination.cursor?.offset === "number"
+            ? pagination.cursor.offset
+            : 0;
         const end = offset + 1;
         return Promise.resolve({
           items: rows.slice(offset, end),
@@ -338,7 +365,8 @@ describe("useDatabaseLogsListingQuery", () => {
       ])
     );
     expect(holder.read).toHaveBeenLastCalledWith(
-      expect.anything(),
+      undefined,
+      undefined,
       expect.objectContaining({ cursor: { offset: 2 } })
     );
   });
@@ -463,23 +491,14 @@ describe("useLogsListingMatches", () => {
     holder.records = records;
     holder.readMatches.mockReset();
     // The seam double: lowercase-contains over the shaped records, like
-    // readLogsListingMatches over the scanned rows.
+    // getMatches over the scanned rows.
     holder.readMatches.mockImplementation(
       (
-        query: LogsListingPageQuery<Row>,
-        find: {
-          pageSize: number;
-          term: string;
-          getRowId: (row: Row) => string;
-          getOrderValue: (row: Row, columnId: string) => unknown;
-          rowText: (row: Row) => string;
-        }
+        filter: Condition | undefined,
+        orderBy: OrderByModel[] | undefined,
+        find: LogsListingFindQuery<Row>
       ) => {
-        const rows = holder.records
-          .map((record) => query.toRow(record as LogListingRow))
-          .filter((row): row is Row => row !== undefined)
-          .filter(query.plan.matches);
-        if (query.plan.compare) rows.sort(query.plan.compare);
+        const rows = shapedRows(filter, orderBy);
         return Promise.resolve(
           rows
             .map((row, offset) => ({ row, offset }))
@@ -488,14 +507,11 @@ describe("useLogsListingMatches", () => {
             )
             .map(({ row, offset }) => {
               const match = { id: find.getRowId(row), offset };
-              return query.orderBy?.length
+              return orderBy?.length
                 ? {
                     ...match,
                     orderValues: Object.fromEntries(
-                      query.orderBy.map(({ column }) => [
-                        column,
-                        find.getOrderValue(row, column),
-                      ])
+                      orderBy.map(({ column }) => [column, row[column]])
                     ),
                   }
                 : match;

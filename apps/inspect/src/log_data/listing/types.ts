@@ -5,7 +5,7 @@ import type {
 } from "@tsmono/inspect-common/query";
 import type { FilterType } from "@tsmono/inspect-components/columnFilter";
 
-import type { Cursor } from "../../../client/database/listing";
+import type { Cursor } from "../../client/database/listing";
 
 /**
  * Result of a listing query — mirrors scout's `TranscriptsResponse`

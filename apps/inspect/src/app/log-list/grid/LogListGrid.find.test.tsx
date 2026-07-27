@@ -138,10 +138,13 @@ describe("LogListGrid Find pagination", () => {
         sorting={[]}
         busy={false}
         listing={{
-          logDir: "/logs",
-          prefix: "/logs",
           universe: "logs::/logs",
-          toRow: () => undefined,
+          // Never called here: useLogsListingMatches is mocked above.
+          data: {
+            getPage: () => Promise.reject(new Error("unused")),
+            getMatches: () => Promise.reject(new Error("unused")),
+            getOverview: () => Promise.reject(new Error("unused")),
+          },
         }}
         hasMoreRows
         fetchMoreRows={() => {}}

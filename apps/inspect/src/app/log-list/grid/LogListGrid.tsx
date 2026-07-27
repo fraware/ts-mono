@@ -20,6 +20,7 @@ import type {
 import { FindBandUI, useFindBandShortcut } from "@tsmono/react/components";
 import { useProperty } from "@tsmono/react/hooks";
 
+import { compareByOrderBy } from "../../../log_data";
 import { useLogsListing } from "../../../state/hooks";
 import { DataGrid } from "../../shared/data-grid/DataGrid";
 import {
@@ -29,7 +30,6 @@ import {
 } from "../../shared/data-grid/findMatches";
 import gridStyles from "../../shared/gridCells.module.css";
 import { mergeSortedRows } from "../listing/applyListingQuery";
-import { compareByOrderBy } from "../listing/evaluator";
 import {
   useLogsListingMatches,
   type LogsListingDescriptor,
@@ -120,14 +120,8 @@ export const LogListGrid: FC<LogListGridProps> = ({
     "mode",
     { defaultValue: "by-metric" }
   );
-  const {
-    columns,
-    visibility,
-    getValue,
-    getComparator,
-    getFilterType,
-    accessorsKey,
-  } = useLogListColumns(mode, scopeDir, scoresViewMode);
+  const { columns, visibility, getValue, getComparator, accessorsKey } =
+    useLogListColumns(mode, scopeDir, scoresViewMode);
 
   const handleRowActivate = useCallback(
     (row: LogListRow) => {
@@ -241,9 +235,6 @@ export const LogListGrid: FC<LogListGridProps> = ({
   const fileMatches = useLogsListingMatches({
     filter,
     orderBy,
-    getValue,
-    getComparator,
-    getFilterType,
     accessorsKey,
     listing,
     term: findTerm,

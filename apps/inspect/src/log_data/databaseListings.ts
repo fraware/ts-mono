@@ -7,6 +7,8 @@ import { throttle } from "@tsmono/util";
 
 import { queryClient } from "../state/queryClient";
 
+import { bumpLogsListingEpoch } from "./logsListingEpoch";
+
 export const databaseLogsListingKeyRoot = [
   "log_data",
   "dexie-listing",
@@ -35,24 +37,6 @@ export const listingKeyUniverse = (queryKey: readonly unknown[]): unknown =>
   queryKey[databaseLogsListingKeyRoot.length];
 
 /**
- * Key of the tier-1 snapshot query: the ordered key list (+ count + inline
- * first page) one `(universe, accessors, filter, orderBy)` combination's page
- * queries compose over. Extends {@link databaseLogsListingKey} rather than
- * defining a new shape so the universe slot, `listingKeyUniverse`, and the
- * root-key invalidation cover it unchanged.
- */
-export const databaseLogsListingSnapshotKey = (
-  universe: string | undefined,
-  accessorsKey: string,
-  filter?: Condition,
-  orderBy?: OrderByModel[]
-) =>
-  [
-    ...databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
-    "snapshot",
-  ] as const;
-
-/**
  * Coalesce replication bursts into at most one refetch of observed Dexie
  * listings per second. A throttle, not a debounce: the flush loops can write
  * back-to-back for a whole sync, and a trailing-only debounce would postpone
@@ -68,6 +52,9 @@ export const databaseLogsListingSnapshotKey = (
  */
 export const invalidateDatabaseLogsListings: () => void = throttle(
   () => {
+    // Epoch first: the refetches this triggers must rebuild their snapshots,
+    // not be served the pre-write ones (see logsListingEpoch).
+    bumpLogsListingEpoch();
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     queryClient.invalidateQueries({
       queryKey: databaseLogsListingKeyRoot,

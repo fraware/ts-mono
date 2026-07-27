@@ -1,35 +1,37 @@
 /**
- * readLogsListing: source dispatch (database vs cache), retried marking, and
- * parity with the in-memory engine — the same fixtures through
- * `applyListingQuery` and the seam must agree (the migration safety net).
- * Uses fake-indexeddb (see setupTests) behind a real DatabaseService.
+ * The listing data access: source dispatch (database vs cache), retried
+ * marking, the instance's internal snapshot cache (dedupe, epoch
+ * invalidation, error eviction), and parity with the in-memory engine — the
+ * same fixtures through `applyListingQuery` and the seam must agree (the
+ * migration safety net). Uses fake-indexeddb (see setupTests) behind a real
+ * DatabaseService.
  */
 
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { Column } from "@tsmono/inspect-common/query";
+import type { Condition, OrderByModel } from "@tsmono/inspect-common/query";
 
 import { applyListingQuery } from "../app/log-list/listing/applyListingQuery";
-import { createListingPlan } from "../app/log-list/listing/planner";
 import type { Log, LogPreview } from "../client/api/types";
 import { DB_NAME } from "../client/database/schema";
 import {
   createDatabaseService,
   type DatabaseService,
 } from "../client/database/service";
-import { queryClient } from "../state/queryClient";
 
-import { databaseLogsListingKeyRoot } from "./databaseListings";
+import { createListingPlan } from "./listing/planner";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
 import { setRows, writeListing } from "./logsContent";
+import { bumpLogsListingEpoch } from "./logsListingEpoch";
 import {
+  createLogsListingData,
   readLogsListing,
-  readLogsListingMatches,
-  readLogsListingPage,
   readLogsOverview,
-  type LogsListingPageQuery,
+  type LogsListingData,
   type LogsListingPageResult,
+  type LogsListingView,
 } from "./logsListingRead";
 
 const holder = vi.hoisted(() => {
@@ -196,34 +198,36 @@ describe("readLogsListing", () => {
   });
 });
 
-describe("readLogsListingPage", () => {
+describe("LogsListingData.getPage", () => {
   let databaseService: DatabaseService;
 
   const identityRow = (log: LogListingRow): Log => log;
 
-  const pageQuery = (
-    overrides?: Partial<LogsListingPageQuery<Log>>
-  ): LogsListingPageQuery<Log> => ({
-    logDir: "/test/logs",
-    prefix: "/test/logs",
-    toRow: identityRow,
-    universe: "test-universe",
-    accessorsKey: "accessors-v1",
-    plan: createListingPlan({ getValue, getComparator: () => undefined }),
-    ...overrides,
-  });
+  const createData = (
+    overrides?: Partial<LogsListingView<Log>>
+  ): LogsListingData<Log> =>
+    createLogsListingData<Log>({
+      logDir: "/test/logs",
+      prefix: "/test/logs",
+      toRow: identityRow,
+      getValue,
+      getComparator: () => undefined,
+      ...overrides,
+    });
 
   /** Walk every page of the paged path (the grid's fetchNextPage loop). */
   const collectPages = async (
-    query: LogsListingPageQuery<Log>,
+    data: LogsListingData<Log>,
+    query: { filter?: Condition; orderBy?: OrderByModel[] },
     limit: number
   ): Promise<LogsListingPageResult<Log>[]> => {
     const pages: LogsListingPageResult<Log>[] = [];
     let cursor: LogsListingPageResult<Log>["next_cursor"] = null;
     do {
-      const page: LogsListingPageResult<Log> = await readLogsListingPage(
-        query,
-        { cursor, limit }
+      const page: LogsListingPageResult<Log> = await data.getPage(
+        query.filter,
+        query.orderBy,
+        { cursor, direction: "forward", limit }
       );
       pages.push(page);
       cursor = page.next_cursor;
@@ -235,11 +239,9 @@ describe("readLogsListingPage", () => {
     databaseService = createDatabaseService();
     holder.service = databaseService;
     await databaseService.openDatabase();
-    queryClient.clear();
   });
 
   afterEach(async () => {
-    queryClient.clear();
     try {
       await databaseService.closeDatabase();
     } catch {
@@ -275,13 +277,8 @@ describe("readLogsListingPage", () => {
       getComparator: () => undefined,
     };
 
-    const query = pageQuery({
-      filter,
-      orderBy,
-      plan: createListingPlan(listingQuery),
-    });
     const limit = 2;
-    const pages = await collectPages(query, limit);
+    const pages = await collectPages(createData(), { filter, orderBy }, limit);
 
     // The same fixtures through the in-memory engine, page-by-page — the
     // migration safety net (mirror the seam's retried marking first).
@@ -311,31 +308,35 @@ describe("readLogsListingPage", () => {
   test("a failed store read during the snapshot build rejects instead of caching an empty listing", async () => {
     // `readLogs` swallows Dexie errors to null. Degrading to the react-query
     // mirror (which can be GC'd empty) would cache keys: [] as a fresh
-    // successful snapshot (staleTime: Infinity) — "No matching items" over a
-    // populated database, with no error surfaced. The failure must reject so
-    // the listing query settles in error (same rationale as readLogRows'
-    // deliberate no-catch).
+    // successful snapshot — "No matching items" over a populated database,
+    // with no error surfaced. The failure must reject so the listing query
+    // settles in error (same rationale as readLogRows' deliberate no-catch),
+    // and the internal cache must evict the rejected build.
     await databaseService.writeLogPreviews({
       "/test/logs/a.json": preview({ task_id: "t-a" }),
     });
     vi.spyOn(databaseService, "readLogs").mockResolvedValue(null);
 
-    globalThis.__TEST_DISABLE_RETRY = true;
-    try {
-      await expect(
-        readLogsListingPage(pageQuery(), { limit: 10 })
-      ).rejects.toThrow(/listing/i);
+    const data = createData();
+    await expect(
+      data.getPage(undefined, undefined, {
+        cursor: null,
+        direction: "forward",
+        limit: 10,
+      })
+    ).rejects.toThrow(/listing/i);
 
-      // The failure must not have been cached: with the store healthy again,
-      // the same query serves the real rows.
-      vi.restoreAllMocks();
-      const recovered = await readLogsListingPage(pageQuery(), { limit: 10 });
-      expect(recovered.items.map((row) => row.name)).toEqual([
-        "/test/logs/a.json",
-      ]);
-    } finally {
-      globalThis.__TEST_DISABLE_RETRY = undefined;
-    }
+    // The failure must not have been cached: with the store healthy again,
+    // the same instance serves the real rows.
+    vi.restoreAllMocks();
+    const recovered = await data.getPage(undefined, undefined, {
+      cursor: null,
+      direction: "forward",
+      limit: 10,
+    });
+    expect(recovered.items.map((row) => row.name)).toEqual([
+      "/test/logs/a.json",
+    ]);
   });
 
   test("pages re-attach the scan's retried marks to bulkGot records", async () => {
@@ -345,16 +346,8 @@ describe("readLogsListingPage", () => {
       "/test/logs/2024-01-02_task.json": preview({ task_id: "shared" }),
     });
     const orderBy = [{ column: "name", direction: "ASC" as const }];
-    const query = pageQuery({
-      orderBy,
-      plan: createListingPlan({
-        orderBy,
-        getValue,
-        getComparator: () => undefined,
-      }),
-    });
 
-    const [first, second] = await collectPages(query, 1);
+    const [first, second] = await collectPages(createData(), { orderBy }, 1);
     // Page one is served inline from the build; page two goes through the
     // bulkGet path — both must carry the cross-row retried derivation.
     expect(first?.items[0]).toMatchObject({
@@ -375,17 +368,48 @@ describe("readLogsListingPage", () => {
     });
     const readLogRowsSpy = vi.spyOn(databaseService, "readLogRows");
 
-    const query = pageQuery();
-    const first = await readLogsListingPage(query, { cursor: null, limit: 2 });
+    const data = createData();
+    const first = await data.getPage(undefined, undefined, {
+      cursor: null,
+      direction: "forward",
+      limit: 2,
+    });
     expect(first.items).toHaveLength(2);
     expect(readLogRowsSpy).not.toHaveBeenCalled();
 
-    const second = await readLogsListingPage(query, {
+    const second = await data.getPage(undefined, undefined, {
       cursor: first.next_cursor,
+      direction: "forward",
       limit: 2,
     });
     expect(second.items).toHaveLength(1);
     expect(readLogRowsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("concurrent page reads of one query share one snapshot scan", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task_id: "t-a" }),
+      "/test/logs/b.json": preview({ task_id: "t-b" }),
+    });
+    const readLogsSpy = vi.spyOn(databaseService, "readLogs");
+
+    const data = createData();
+    const [first, second] = await Promise.all([
+      data.getPage(undefined, undefined, {
+        cursor: null,
+        direction: "forward",
+        limit: 1,
+      }),
+      data.getPage(undefined, undefined, {
+        cursor: { offset: 1 },
+        direction: "forward",
+        limit: 1,
+      }),
+    ]);
+    // The promise-valued cache dedupes: both pages await the same build.
+    expect(readLogsSpy).toHaveBeenCalledTimes(1);
+    expect(first.items).toHaveLength(1);
+    expect(second.items).toHaveLength(1);
   });
 
   test("a single page holding the whole universe matches the unpaged read", async () => {
@@ -394,22 +418,53 @@ describe("readLogsListingPage", () => {
       "/test/logs/b.json": preview({ task_id: "t-b" }),
     });
 
-    const query = pageQuery();
-    const paged = await readLogsListingPage(query, {
+    const data = createData();
+    const paged = await data.getPage(undefined, undefined, {
       cursor: null,
+      direction: "forward",
       limit: 100,
     });
     const unpaged = await readLogsListing(
       "/test/logs",
       "/test/logs",
       identityRow,
-      query.plan
+      createListingPlan({ getValue, getComparator: () => undefined })
     );
     // The snapshot-scoped aggregate rides beside the parity fields.
     const { universe_task_ids, ...parityFields } = paged;
     expect(parityFields).toEqual(unpaged);
     expect([...(universe_task_ids ?? [])].sort()).toEqual(["t-a", "t-b"]);
     expect(paged.next_cursor).toBeNull();
+  });
+
+  test("serves a backward page as the slice before the cursor", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task_id: "t-a" }),
+      "/test/logs/b.json": preview({ task_id: "t-b" }),
+      "/test/logs/c.json": preview({ task_id: "t-c" }),
+    });
+    const orderBy = [{ column: "name", direction: "ASC" as const }];
+
+    const data = createData();
+    // Null backward cursor: from the end of the result.
+    const tail = await data.getPage(undefined, orderBy, {
+      cursor: null,
+      direction: "backward",
+      limit: 2,
+    });
+    expect(tail.items.map((row) => row.name)).toEqual([
+      "/test/logs/b.json",
+      "/test/logs/c.json",
+    ]);
+    expect(tail.next_cursor).toEqual({ offset: 1 });
+
+    const head = await data.getPage(undefined, orderBy, {
+      cursor: tail.next_cursor,
+      direction: "backward",
+      limit: 2,
+    });
+    expect(head.items.map((row) => row.name)).toEqual(["/test/logs/a.json"]);
+    expect(head.next_cursor).toBeNull();
   });
 
   test("drops holes for keys deleted between snapshot and page read", async () => {
@@ -420,21 +475,19 @@ describe("readLogsListingPage", () => {
       "/test/logs/d.json": preview({ task_id: "t-d" }),
     });
     const orderBy = [{ column: "name", direction: "ASC" as const }];
-    const query = pageQuery({
-      orderBy,
-      plan: createListingPlan({
-        orderBy,
-        getValue,
-        getComparator: () => undefined,
-      }),
-    });
 
     // Prime the snapshot, then delete a row from a later page's slice.
-    const first = await readLogsListingPage(query, { cursor: null, limit: 2 });
+    const data = createData();
+    const first = await data.getPage(undefined, orderBy, {
+      cursor: null,
+      direction: "forward",
+      limit: 2,
+    });
     await databaseService.clearCacheForFile("/test/logs/c.json");
 
-    const second = await readLogsListingPage(query, {
+    const second = await data.getPage(undefined, orderBy, {
       cursor: first.next_cursor,
+      direction: "forward",
       limit: 2,
     });
     expect(second.items.map((row) => row.name)).toEqual(["/test/logs/d.json"]);
@@ -453,20 +506,15 @@ describe("readLogsListingPage", () => {
     });
     const filter = new Column("model").ilike("gpt%");
     const orderBy = [{ column: "name", direction: "ASC" as const }];
-    const query = pageQuery({
-      filter,
-      orderBy,
-      plan: createListingPlan({
-        filter,
-        orderBy,
-        getValue,
-        getComparator: () => undefined,
-      }),
-    });
 
     // Prime the snapshot, then a replication write flips a later-page row
     // out of the filter before its page is read.
-    const first = await readLogsListingPage(query, { cursor: null, limit: 2 });
+    const data = createData();
+    const first = await data.getPage(filter, orderBy, {
+      cursor: null,
+      direction: "forward",
+      limit: 2,
+    });
     await databaseService.writeLogPreviews({
       "/test/logs/c.json": preview({ model: "claude", task_id: "t-c" }),
     });
@@ -474,8 +522,9 @@ describe("readLogsListingPage", () => {
     // The page must not serve a row the active filter excludes — it runs
     // short (like a deleted key) until the next invalidation rebuilds the
     // key list.
-    const second = await readLogsListingPage(query, {
+    const second = await data.getPage(filter, orderBy, {
       cursor: first.next_cursor,
+      direction: "forward",
       limit: 2,
     });
     expect(second.items.map((row) => row.name)).toEqual(["/test/logs/d.json"]);
@@ -490,22 +539,20 @@ describe("readLogsListingPage", () => {
       "/test/logs/c.json": preview({ model: "claude", task_id: "t-c" }),
     });
     const filter = new Column("model").ilike("gpt%");
-    const query = pageQuery({
-      filter,
-      plan: createListingPlan({
-        filter,
-        getValue,
-        getComparator: () => undefined,
-      }),
-    });
 
     // Every page reports the whole filtered universe's task ids (parity with
     // the pre-pagination anti-join, which saw the full filtered row set) —
     // a pending task whose file sits on an unloaded page must still settle.
-    const first = await readLogsListingPage(query, { cursor: null, limit: 1 });
+    const data = createData();
+    const first = await data.getPage(filter, undefined, {
+      cursor: null,
+      direction: "forward",
+      limit: 1,
+    });
     expect([...(first.universe_task_ids ?? [])].sort()).toEqual(["t-a", "t-b"]);
-    const second = await readLogsListingPage(query, {
+    const second = await data.getPage(filter, undefined, {
       cursor: first.next_cursor,
+      direction: "forward",
       limit: 1,
     });
     expect([...(second.universe_task_ids ?? [])].sort()).toEqual([
@@ -520,8 +567,12 @@ describe("readLogsListingPage", () => {
       "/test/logs/b.json": preview({ task_id: "t-b" }),
       "/test/logs/c.json": preview({ task_id: "t-c" }),
     });
-    const query = pageQuery();
-    const first = await readLogsListingPage(query, { cursor: null, limit: 2 });
+    const data = createData();
+    const first = await data.getPage(undefined, undefined, {
+      cursor: null,
+      direction: "forward",
+      limit: 2,
+    });
 
     // A transient store failure must surface as a page error (React Query
     // error state → banner, paused auto-fetch) — an empty page would be
@@ -530,29 +581,39 @@ describe("readLogsListingPage", () => {
       new Error("InvalidStateError: database is closing")
     );
     await expect(
-      readLogsListingPage(query, { cursor: first.next_cursor, limit: 2 })
+      data.getPage(undefined, undefined, {
+        cursor: first.next_cursor,
+        direction: "forward",
+        limit: 2,
+      })
     ).rejects.toThrow("database is closing");
   });
 
-  test("invalidation rebuilds the snapshot and streams new rows in", async () => {
+  test("an epoch bump rebuilds the snapshot and streams new rows in", async () => {
     await databaseService.writeLogPreviews({
       "/test/logs/a.json": preview({ task_id: "t-a" }),
     });
-    const query = pageQuery();
-    const before = await readLogsListingPage(query, { cursor: null, limit: 5 });
+    const data = createData();
+    const before = await data.getPage(undefined, undefined, {
+      cursor: null,
+      direction: "forward",
+      limit: 5,
+    });
     expect(before.total_count).toBe(1);
 
-    // A replication write lands and the write path invalidates the listing
-    // root: the (observer-less) snapshot must rebuild on the next page read,
-    // not serve its stale keys.
+    // A replication write lands and the write path bumps the listing epoch:
+    // the cached snapshot must rebuild on the next page read, not serve its
+    // stale keys.
     await databaseService.writeLogPreviews({
       "/test/logs/b.json": preview({ task_id: "t-b" }),
     });
-    await queryClient.invalidateQueries({
-      queryKey: databaseLogsListingKeyRoot,
-    });
+    bumpLogsListingEpoch();
 
-    const after = await readLogsListingPage(query, { cursor: null, limit: 5 });
+    const after = await data.getPage(undefined, undefined, {
+      cursor: null,
+      direction: "forward",
+      limit: 5,
+    });
     expect(after.total_count).toBe(2);
     expect(after.items.map((row) => row.name).sort()).toEqual([
       "/test/logs/a.json",
@@ -567,8 +628,12 @@ describe("readLogsListingPage", () => {
     ]);
     await databaseService.closeDatabase();
 
-    const query = pageQuery({ logDir: "/cache/logs", prefix: "/cache/logs" });
-    const page = await readLogsListingPage(query, { cursor: null, limit: 1 });
+    const data = createData({ logDir: "/cache/logs", prefix: "/cache/logs" });
+    const page = await data.getPage(undefined, undefined, {
+      cursor: null,
+      direction: "forward",
+      limit: 1,
+    });
     // The whole listing in one page: cache-only scopes don't paginate.
     expect(page.items.map((row) => row.name)).toEqual([
       "/cache/logs/a.json",
@@ -673,18 +738,25 @@ describe("readLogsOverview", () => {
   });
 });
 
-describe("readLogsListingMatches", () => {
+describe("LogsListingData.getMatches", () => {
   let databaseService: DatabaseService;
+
+  const createData = (): LogsListingData<Log> =>
+    createLogsListingData<Log>({
+      logDir: "/test/logs",
+      prefix: "/test/logs",
+      toRow: (log: LogListingRow) => log,
+      getValue,
+      getComparator: () => undefined,
+    });
 
   beforeEach(async () => {
     databaseService = createDatabaseService();
     holder.service = databaseService;
     await databaseService.openDatabase();
-    queryClient.clear();
   });
 
   afterEach(async () => {
-    queryClient.clear();
     await databaseService.closeDatabase();
     await Dexie.delete(DB_NAME);
   });
@@ -708,23 +780,12 @@ describe("readLogsListingMatches", () => {
           })
       );
 
-    const pending = readLogsListingMatches(
-      {
-        logDir: "/test/logs",
-        prefix: "/test/logs",
-        toRow: (log: LogListingRow) => log,
-        universe: "test-universe",
-        accessorsKey: "accessors-v1",
-        plan: createListingPlan({ getValue, getComparator: () => undefined }),
-      },
-      {
-        pageSize: 2,
-        term: "alpha",
-        getRowId: (row) => row.name,
-        getOrderValue: getValue,
-        rowText: (row) => `${row.name}\n${row.task ?? ""}`.toLowerCase(),
-      }
-    );
+    const pending = createData().getMatches(undefined, undefined, {
+      pageSize: 2,
+      term: "alpha",
+      getRowId: (row) => row.name,
+      rowText: (row) => `${row.name}\n${row.task ?? ""}`.toLowerCase(),
+    });
 
     // Both reads must be in flight before either resolves.
     await vi.waitFor(() => expect(readLogsSpy).toHaveBeenCalledTimes(2));
@@ -734,7 +795,7 @@ describe("readLogsListingMatches", () => {
     expect(matches.map((match) => match.id)).toEqual(["/test/logs/a.json"]);
   });
 
-  test("returns matching row ids and snapshot offsets under the active plan", async () => {
+  test("returns matching row ids and snapshot offsets under the active filter", async () => {
     await databaseService.writeLogPreviews({
       "/test/logs/a.json": preview({ task: "alpha", task_id: "t-a" }),
       "/test/logs/b.json": preview({
@@ -743,8 +804,8 @@ describe("readLogsListingMatches", () => {
         model: "gpt-4o",
       }),
       "/test/logs/c.json": preview({ task: "alphabet", task_id: "t-c" }),
-      // Text matches the term but the plan's filter excludes it: matches
-      // must respect the same filter as the row query.
+      // Text matches the term but the filter excludes it: matches must
+      // respect the same filter as the row query.
       "/test/logs/d.json": preview({
         task: "alpha",
         task_id: "t-d",
@@ -754,31 +815,13 @@ describe("readLogsListingMatches", () => {
 
     const filter = new Column("model").ilike("gpt%");
     const orderBy = [{ column: "name", direction: "DESC" as const }];
-    const matches = await readLogsListingMatches(
-      {
-        logDir: "/test/logs",
-        prefix: "/test/logs",
-        toRow: (log: LogListingRow) => log,
-        universe: "test-universe",
-        accessorsKey: "accessors-v1",
-        filter,
-        orderBy,
-        plan: createListingPlan({
-          filter,
-          orderBy,
-          getValue,
-          getComparator: () => undefined,
-        }),
-      },
-      {
-        pageSize: 2,
-        // Lowercased per rowText's contract; the term may be any case.
-        term: "ALPHA",
-        getRowId: (row) => row.name,
-        getOrderValue: getValue,
-        rowText: (row) => `${row.name}\n${row.task ?? ""}`.toLowerCase(),
-      }
-    );
+    const matches = await createData().getMatches(filter, orderBy, {
+      pageSize: 2,
+      // Lowercased per rowText's contract; the term may be any case.
+      term: "ALPHA",
+      getRowId: (row) => row.name,
+      rowText: (row) => `${row.name}\n${row.task ?? ""}`.toLowerCase(),
+    });
 
     expect(matches).toEqual([
       {
@@ -800,32 +843,23 @@ describe("readLogsListingMatches", () => {
       "/test/logs/c.json": preview({ task: "match", task_id: "t-c" }),
     });
     const orderBy = [{ column: "name", direction: "ASC" as const }];
-    const query: LogsListingPageQuery<Log> = {
-      logDir: "/test/logs",
-      prefix: "/test/logs",
-      toRow: (log: LogListingRow) => log,
-      universe: "test-universe",
-      accessorsKey: "accessors-v1",
-      orderBy,
-      plan: createListingPlan({
-        orderBy,
-        getValue,
-        getComparator: () => undefined,
-      }),
-    };
 
-    await readLogsListingPage(query, { cursor: null, limit: 1 });
+    const data = createData();
+    await data.getPage(undefined, orderBy, {
+      cursor: null,
+      direction: "forward",
+      limit: 1,
+    });
     // No invalidation: the new leading row is not part of the page
     // snapshot, so it must not shift or join the match projection.
     await databaseService.writeLogPreviews({
       "/test/logs/a.json": preview({ task: "match", task_id: "t-a" }),
     });
 
-    const matches = await readLogsListingMatches(query, {
+    const matches = await data.getMatches(undefined, orderBy, {
       pageSize: 1,
       term: "match",
       getRowId: (row) => row.name,
-      getOrderValue: getValue,
       rowText: (row) => row.task ?? "",
     });
     expect(matches).toEqual([

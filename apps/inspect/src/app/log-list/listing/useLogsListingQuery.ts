@@ -12,22 +12,17 @@ import { useDebouncedCallback } from "@tsmono/react/hooks";
 import { loading, type AsyncData } from "@tsmono/util";
 
 import type { Cursor } from "../../../client/database/listing";
-import type { LogListingRow, LogsListingMatch } from "../../../log_data";
-import {
-  databaseLogsListingKey,
-  listingKeyUniverse,
-  readLogsListingMatches,
-  readLogsListingPage,
-} from "../../../log_data";
-
-import { applyListingQuery } from "./applyListingQuery";
-import { createListingPlan } from "./planner";
 import type {
   FilterTypeAccessor,
+  LogsListingData,
+  LogsListingMatch,
   LogsListingResult,
   ValueAccessor,
   ValueComparator,
-} from "./types";
+} from "../../../log_data";
+import { databaseLogsListingKey, listingKeyUniverse } from "../../../log_data";
+
+import { applyListingQuery } from "./applyListingQuery";
 
 /** TanStack `SortingState` → API `OrderBy[]`. Mirrors scout's helper. */
 export const sortingStateToOrderBy = (sorting: SortingState): OrderByModel[] =>
@@ -76,30 +71,26 @@ export function useLogsListingQuery<TRow>({
 
 /** The listing source a view queries — shared by the row query, the find
  *  band's match query, and (eventually) the offset lookup, so they can
- *  never disagree about the row universe. */
+ *  never disagree about the row universe, and so their reads share one
+ *  data instance (and its snapshot cache — a page fetch and a Find scan
+ *  of the same query dedupe into one scan). */
 export interface LogsListingDescriptor<TRow> {
-  /** The synced directory whose rows are the source (see `readLogsListing`
-   *  for where they're read from). */
-  logDir: string;
-  /** Row-universe scan prefix (folder mode lists a subdirectory). */
-  prefix: string;
-  /** Cache identity of the row universe: everything `toRow` reads beyond
-   *  the record itself (view mode, directory, display toggles).
-   *  `undefined` while the scope is still hydrating — disables queries. */
+  /** Cache identity of the row universe: everything the instance's `toRow`
+   *  reads beyond the record itself (view mode, directory, display
+   *  toggles). `undefined` while the scope is still hydrating — disables
+   *  queries. */
   universe: string | undefined;
-  /** Shape a source record into the view's row, or `undefined` when the
-   *  view has no row for it (row-universe membership). */
-  toRow: (log: LogListingRow) => TRow | undefined;
+  /** The view's listing data access (see `createLogsListingData`) —
+   *  constructed by the panel, memoized on the view inputs. */
+  data: LogsListingData<TRow>;
 }
 
 interface UseDatabaseLogsListingParams<TRow> {
   filter?: Condition;
   orderBy?: OrderByModel[];
-  getValue: ValueAccessor<TRow>;
-  getComparator: (columnId: string) => ValueComparator | undefined;
-  getFilterType?: FilterTypeAccessor;
-  /** Cache identity of the accessors above (see `useLogListColumns`) — the
-   *  score-column schema lands asynchronously and changes what the plan
+  /** Cache identity of the view-level column accessors the listing data
+   *  evaluates conditions/sorts through (see `useLogListColumns`) — the
+   *  score-column schema lands asynchronously and changes what a query
    *  computes, so it must key the query alongside filter/orderBy. */
   accessorsKey: string;
   listing: LogsListingDescriptor<TRow>;
@@ -148,31 +139,26 @@ export interface DatabaseLogsListing<TRow> {
 }
 
 /**
- * The log listing query: a react-query `useInfiniteQuery` over
- * `readLogsListingPage` — pages compose over the tier-1 key-list snapshot
- * (built once per (universe, accessors, filter, orderBy), shared by every
- * page, invalidated by the write path's throttled root-key invalidation).
- * Rows are read from the listing source (IndexedDB in dir mode; db-less and
- * cache-only scopes fall back to the react-query cache inside the same
- * queryFn) and shaped per view inside the queryFn, so the full row list
- * never has to live in memory for the grid's sake. Results are asynchronous
- * by design: the first read shows whatever has replicated so far, and the
- * write path's throttled invalidation streams further rows in as they land
- * (refetching both tiers; `placeholderData` prevents blanking). `loading`
- * covers hydration and the universe's first read; within one universe a
- * re-filter/sort reports the previous result as `data` (no loading flash)
- * until the new read lands.
+ * The log listing query: a react-query `useInfiniteQuery` over the listing
+ * data's `getPage` — a thin wrapper, like scout's
+ * `useServerTranscriptsInfinite` over `api.getTranscripts`. Pages compose
+ * over the implementation's internal snapshot (one scan per (filter,
+ * orderBy), shared by every page and by the find band's match query;
+ * invalidated by the write path's throttled epoch bump + root-key
+ * invalidation). Results are asynchronous by design: the first read shows
+ * whatever has replicated so far, and the write path's throttled
+ * invalidation streams further rows in as they land (`placeholderData`
+ * prevents blanking). `loading` covers hydration and the universe's first
+ * read; within one universe a re-filter/sort reports the previous result
+ * as `data` (no loading flash) until the new read lands.
  */
 export function useDatabaseLogsListingQuery<TRow>({
   filter,
   orderBy,
-  getValue,
-  getComparator,
-  getFilterType,
   accessorsKey,
   listing,
 }: UseDatabaseLogsListingParams<TRow>): DatabaseLogsListing<TRow> {
-  const { logDir, prefix, universe, toRow } = listing;
+  const { universe, data: listingData } = listing;
   const queryKey = useMemo(
     () => databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
     [universe, accessorsKey, filter, orderBy]
@@ -224,25 +210,11 @@ export function useDatabaseLogsListingQuery<TRow>({
     }: {
       pageParam: Cursor | null;
     }): Promise<LogsListingResult<TRow>> =>
-      readLogsListingPage(
-        {
-          logDir,
-          prefix,
-          toRow,
-          universe,
-          accessorsKey,
-          filter,
-          orderBy,
-          plan: createListingPlan({
-            filter,
-            orderBy,
-            getValue,
-            getComparator,
-            getFilterType,
-          }),
-        },
-        { cursor: pageParam, limit: kLogsListingPageSize }
-      ),
+      listingData.getPage(filter, orderBy, {
+        cursor: pageParam,
+        direction: "forward",
+        limit: kLogsListingPageSize,
+      }),
     initialPageParam: null as Cursor | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
     // Deliberately no `maxPages`: react-query drops capped pages off the
@@ -354,9 +326,6 @@ interface UseLogsListingMatchesParams<TRow> {
    *  never disagree with the rendered rows). */
   filter?: Condition;
   orderBy?: OrderByModel[];
-  getValue: ValueAccessor<TRow>;
-  getComparator: (columnId: string) => ValueComparator | undefined;
-  getFilterType?: FilterTypeAccessor;
   accessorsKey: string;
   listing: LogsListingDescriptor<TRow>;
   /** The live find term. The query runs under a debounced copy: every
@@ -395,9 +364,6 @@ export interface LogsListingMatches {
 export function useLogsListingMatches<TRow>({
   filter,
   orderBy,
-  getValue,
-  getComparator,
-  getFilterType,
   accessorsKey,
   listing,
   term,
@@ -418,7 +384,7 @@ export function useLogsListingMatches<TRow>({
     setMatchTerm("");
   }, [syncMatchTerm]);
 
-  const { logDir, prefix, universe, toRow } = listing;
+  const { universe, data: listingData } = listing;
   const query = useQuery({
     queryKey: [
       ...databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
@@ -427,31 +393,12 @@ export function useLogsListingMatches<TRow>({
       searchKey,
     ],
     queryFn: (): Promise<LogsListingMatch[]> =>
-      readLogsListingMatches(
-        {
-          logDir,
-          prefix,
-          toRow,
-          universe,
-          accessorsKey,
-          filter,
-          orderBy,
-          plan: createListingPlan({
-            filter,
-            orderBy,
-            getValue,
-            getComparator,
-            getFilterType,
-          }),
-        },
-        {
-          pageSize: kLogsListingPageSize,
-          term: matchTerm,
-          getRowId,
-          getOrderValue: getValue,
-          rowText,
-        }
-      ),
+      listingData.getMatches(filter, orderBy, {
+        pageSize: kLogsListingPageSize,
+        term: matchTerm,
+        getRowId,
+        rowText,
+      }),
     enabled: enabled && matchTerm !== "" && universe !== undefined,
     // Keep the previous matches while a keystroke's refetch is in flight —
     // within one universe only (see the docstring above).

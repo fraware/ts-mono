@@ -1,21 +1,29 @@
-import type { Condition, OrderByModel } from "@tsmono/inspect-common/query";
+import type {
+  Condition,
+  OrderByModel,
+  Pagination,
+} from "@tsmono/inspect-common/query";
 import { ensureTrailingSlash, isInDirectory } from "@tsmono/util";
 
 import type { Log } from "../client/api/types";
 import { scopePrefix } from "../client/database";
 import {
   pageRows,
-  type Cursor,
   type DatabaseListingPlan,
   type DatabaseListingResult,
 } from "../client/database/listing";
-import { queryClient } from "../state/queryClient";
 import { directoryRelativeUrl, rootName } from "../utils/uri";
 
-import { databaseLogsListingSnapshotKey } from "./databaseListings";
 import { getDatabaseService } from "./databaseServiceInstance";
+import { createListingPlan } from "./listing/planner";
+import type {
+  FilterTypeAccessor,
+  ValueAccessor,
+  ValueComparator,
+} from "./listing/types";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
 import { getLogRows, isCacheOnlyListingScope } from "./logsContent";
+import { logsListingEpoch } from "./logsListingEpoch";
 
 /**
  * Where listing queries for `logDir` read their rows — an explicit,
@@ -38,11 +46,11 @@ const scanRows = async (logDir: string, prefix: string): Promise<Log[]> => {
     const logs = await getDatabaseService().readLogs({ prefix });
     if (logs !== null) return logs;
     // `readLogs` swallows store errors to null. Don't degrade to the cache
-    // mirror: it can be GC'd empty, and the snapshot cache (staleTime:
-    // Infinity) would then serve "no items" as a durable success over a
-    // populated database — indistinguishable from mass deletion (the same
-    // rationale as readLogRows' no-catch). Reject so the listing query
-    // settles in error and the retry/banner path owns recovery.
+    // mirror: it can be GC'd empty, and the snapshot cache would then serve
+    // "no items" as a durable success over a populated database —
+    // indistinguishable from mass deletion (the same rationale as
+    // readLogRows' no-catch). Reject so the listing query settles in error
+    // and the retry/banner path owns recovery.
     throw new Error("Reading the log listing from the local database failed");
   }
   // An out-of-namespace scope's names never start with the scope prefix —
@@ -213,112 +221,6 @@ export interface LogsListingPageResult<
   universe_task_ids?: string[];
 }
 
-/** The query inputs a paged listing read composes over: the listing source
- *  (`logDir`/`prefix`/`toRow`), the snapshot's cache identity (the row
- *  query's own key slots), and the compiled plan (pagination unset — paging
- *  slices the snapshot's key list, not the plan). */
-export interface LogsListingPageQuery<TRow> {
-  logDir: string;
-  prefix: string;
-  toRow: (log: LogListingRow) => TRow | undefined;
-  /** `undefined` only while the scope hydrates — queries are disabled then,
-   *  so a page read never actually runs without a universe. */
-  universe: string | undefined;
-  accessorsKey: string;
-  filter?: Condition;
-  orderBy?: OrderByModel[];
-  plan: DatabaseListingPlan<TRow>;
-}
-
-const fetchLogsListingSnapshot = <TRow>(
-  query: LogsListingPageQuery<TRow>,
-  firstPageSize: number
-): Promise<LogsListingSnapshot<TRow>> =>
-  queryClient.fetchQuery({
-    queryKey: databaseLogsListingSnapshotKey(
-      query.universe,
-      query.accessorsKey,
-      query.filter,
-      query.orderBy
-    ),
-    queryFn: () =>
-      readLogsListingSnapshot(
-        query.logDir,
-        query.prefix,
-        query.toRow,
-        query.plan,
-        firstPageSize
-      ),
-    staleTime: Infinity,
-    gcTime: 30_000,
-    // The page/match queries calling this already retry via the client's
-    // default policy, and each outer attempt that finds this query settled
-    // in error starts a fresh inner cycle — an inherited retry here would
-    // multiply attempts and delay the error banner by tens of seconds.
-    retry: false,
-  });
-
-/**
- * Serve one page of the listing via the two-tier snapshot scheme
- * (decision 3): the snapshot is itself a react-query entry — obtained
- * through `fetchLogsListingSnapshot`, so page and Find reads dedupe into
- * one build, later reads reuse it, and lifecycle is plain `gcTime`. `fetchQuery`
- * with `staleTime: Infinity` rather than `ensureQueryData`: both dedupe,
- * but after the write path invalidates the (observer-less) snapshot,
- * `ensureQueryData` would resolve with the stale keys and only rebuild in
- * the background — a final sync write would then never reach the grid,
- * breaking the streaming invariant. `fetchQuery` awaits the rebuild
- * exactly when the snapshot has been invalidated and serves it from cache
- * otherwise.
- *
- * `limit` is required: an unlimited page would trust the cached snapshot's
- * inline first page to be the whole listing, but the snapshot key carries
- * no limit slot — one built by a limited call would be served truncated
- * with `next_cursor: null`, silently claiming completeness. Cache-only
- * scopes (db-less sessions, out-of-namespace dirs) don't take the snapshot
- * path at all — their rows already live in memory, so one scan per read
- * stays the simpler and equally-cheap form.
- */
-export const readLogsListingPage = async <TRow>(
-  query: LogsListingPageQuery<TRow>,
-  page: { cursor?: Cursor | null; limit: number }
-): Promise<LogsListingPageResult<TRow>> => {
-  const { logDir, prefix, toRow, plan } = query;
-  if (logsListingSource(logDir) === "cache") {
-    // No universe_task_ids: the cache path's single page IS the whole
-    // universe, so the anti-join's loaded-window fallback already covers it.
-    return readLogsListing(logDir, prefix, toRow, plan);
-  }
-  // Fresh until invalidated (see above); short gcTime because the key list
-  // + inline first page are per-(filter, orderBy) copies and the query has
-  // no observers to keep it active.
-  const snapshot = await fetchLogsListingSnapshot(query, page.limit);
-
-  const offset =
-    page.cursor && typeof page.cursor.offset === "number"
-      ? page.cursor.offset
-      : 0;
-  const { total_count } = snapshot;
-  // The inline first page covers offset 0 whenever it holds `limit` rows —
-  // or the whole (shorter) universe. A cached snapshot built under another
-  // limit falls through to the bulkGet path.
-  const items =
-    offset === 0 &&
-    (snapshot.firstPage.length >= page.limit ||
-      snapshot.firstPage.length === total_count)
-      ? snapshot.firstPage.slice(0, page.limit)
-      : await readSnapshotPageRows(snapshot, toRow, plan, offset, page.limit);
-  const end = offset + page.limit;
-  return {
-    items,
-    total_count,
-    universe_task_ids: snapshot.task_ids,
-    // Cursors index the snapshot's key list (not served-row counts), so a
-    // dropped hole never desyncs subsequent pages.
-    next_cursor: end < total_count ? { offset: end } : null,
-  };
-};
-
 /** View inputs for {@link readLogsOverview}. */
 export interface LogsOverviewView {
   /** Folder-mode current directory; unset in the flat tasks view (which
@@ -451,67 +353,297 @@ export interface LogsListingMatch {
   orderValues?: Record<string, unknown>;
 }
 
-/** Rows whose searchable text contains `term` (case-insensitive), in the
- * same snapshot order and with the same offsets as page cursors. */
-export const readLogsListingMatches = async <TRow>(
-  query: LogsListingPageQuery<TRow>,
-  find: {
-    pageSize: number;
-    term: string;
-    getRowId: (row: TRow) => string;
-    getOrderValue: (row: TRow, columnId: string) => unknown;
-    /** A row's searchable text, already lowercased (`rowSearchText`'s
-     *  contract) — the scan must not pay a second per-row lowering. */
-    rowText: (row: TRow) => string;
-  }
-): Promise<LogsListingMatch[]> => {
-  const { logDir, prefix, toRow, plan } = query;
-  const term = find.term.toLowerCase();
-  const toMatch = (row: TRow, offset: number): LogsListingMatch => {
-    const orderValues = query.orderBy?.length
-      ? Object.fromEntries(
-          query.orderBy.map(({ column }) => [
-            column,
-            find.getOrderValue(row, column),
-          ])
-        )
-      : undefined;
-    const match = { id: find.getRowId(row), offset };
-    return orderValues === undefined ? match : { ...match, orderValues };
+/** The find-only query inputs of {@link LogsListingData.getMatches}. */
+export interface LogsListingFindQuery<TRow> {
+  /** Sizes the snapshot build's inline first page when the match query is
+   *  the one that builds it. */
+  pageSize: number;
+  term: string;
+  getRowId: (row: TRow) => string;
+  /** A row's searchable text, already lowercased (`rowSearchText`'s
+   *  contract) — the scan must not pay a second per-row lowering. This is
+   *  view code crossing the interface transitionally: matching runs against
+   *  formatted on-screen text, which stored fields can't reproduce yet
+   *  (design/listing-data-interface.md, `getMatches`). */
+  rowText: (row: TRow) => string;
+}
+
+/**
+ * Everything the view supplies to construct a {@link LogsListingData}:
+ * where rows are read from (`logDir`/`prefix`), how records shape into view
+ * rows (`toRow`, which also owns row-universe membership until the
+ * membership rules move into filter conditions), and the view-level column
+ * accessors that conditions and sorts are transitionally evaluated through
+ * (see design/listing-data-interface.md for both exit paths).
+ */
+export interface LogsListingView<TRow> {
+  logDir: string;
+  /** Row-universe scan prefix (folder mode lists a subdirectory). Must stay
+   *  consistent with what `toRow` accepts — a narrower prefix would
+   *  silently drop matching rows. Deleted when membership moves into the
+   *  filter condition (the prefix derives from it). */
+  prefix: string;
+  /** Shape a source record into the view's row, or `undefined` when the
+   *  view has no row for it (row-universe membership). */
+  toRow: (log: LogListingRow) => TRow | undefined;
+  /** Reads a row's raw value for a column id. */
+  getValue: ValueAccessor<TRow>;
+  /** Per-column value comparator (falls back to a default compare). */
+  getComparator: (columnId: string) => ValueComparator | undefined;
+  /** Per-column filter type (type-aware filter coercion). */
+  getFilterType?: FilterTypeAccessor;
+}
+
+/**
+ * Data access for the log listing page — the seam between view code and
+ * storage (design/listing-data-interface.md). Methods take a filter, a sort
+ * order, and pagination, and return one page plus whole-result facts; what
+ * sits behind them (today an IndexedDB scan, later a better local engine or
+ * a server) is invisible above the interface, so nothing above it may be
+ * tuned around the current implementation's cost profile.
+ */
+export interface LogsListingData<TRow> {
+  /**
+   * One page of the listing plus facts about the whole result set (the
+   * footer's `total_count`, the pending anti-join's `universe_task_ids`).
+   * All pages of one (filter, orderBy) slice a shared frozen snapshot, so
+   * concurrent replication writes can't cause duplicates or gaps
+   * mid-scroll; the write path's invalidation is what advances reads to
+   * fresher data. Cursors are opaque positions in the filtered+sorted
+   * result and work in both directions (a backward page is the slice
+   * before the cursor; a null backward cursor starts from the end).
+   */
+  getPage(
+    filter: Condition | undefined,
+    orderBy: OrderByModel[] | undefined,
+    pagination: Pagination
+  ): Promise<LogsListingPageResult<TRow>>;
+
+  /**
+   * Rows whose searchable text contains the term across the WHOLE filtered
+   * result — loaded and unloaded pages alike — in result order, with the
+   * same offsets page cursors use (so "jump to this match" is "load pages
+   * through this position"). Conceptually `getPage` with a different
+   * projection; only the data layer can answer it, while all find
+   * *behavior* (debounce, current match, loading through an offset) stays
+   * above the interface.
+   */
+  getMatches(
+    filter: Condition | undefined,
+    orderBy: OrderByModel[] | undefined,
+    find: LogsListingFindQuery<TRow>
+  ): Promise<LogsListingMatch[]>;
+
+  /**
+   * Aggregate facts about the scope beyond the queried rows — one scan
+   * produces all of them. Takes named options rather than conditions
+   * because its numbers deliberately span *different* membership variants
+   * in one answer (see {@link readLogsOverview}).
+   */
+  getOverview(view: LogsOverviewView): Promise<LogsOverview>;
+}
+
+/** The active query's snapshot plus the previous one, which may still be
+ *  serving placeholder rows; a changed filter or sort rescans anyway. The
+ *  overview doesn't consume snapshots, so it can't thrash these slots. */
+const kSnapshotCacheEntries = 2;
+
+/**
+ * Create the log listing's data access over today's storage: the two-tier
+ * scan (one snapshot scan per (filter, orderBy), cheap key-slice pages —
+ * see {@link LogsListingSnapshot}), with cache-only scopes (db-less
+ * sessions, out-of-namespace dirs) served as one unpaged in-memory read.
+ *
+ * Construct one instance per view, memoized on the view inputs: the
+ * snapshot cache lives in the instance, so a changed view or accessor
+ * schema means a fresh instance and a fresh cache.
+ */
+export const createLogsListingData = <TRow>(
+  view: LogsListingView<TRow>
+): LogsListingData<TRow> => {
+  const { logDir, prefix, toRow } = view;
+
+  const compilePlan = (
+    filter: Condition | undefined,
+    orderBy: OrderByModel[] | undefined
+  ): DatabaseListingPlan<TRow> =>
+    createListingPlan({
+      filter,
+      orderBy,
+      getValue: view.getValue,
+      getComparator: view.getComparator,
+      getFilterType: view.getFilterType,
+    });
+
+  // The snapshot cache. Promise-valued so concurrent page and Find reads of
+  // one (filter, orderBy) dedupe into a single scan; keyed by the
+  // serialized query values — the filter condition's value IS the cache
+  // identity (`toJSON` is deterministic for a given construction; an
+  // equivalent condition built differently just misses and rescans).
+  // Entries are epoch-stamped (see logsListingEpoch): a bumped epoch means
+  // the next read rebuilds and awaits, so an invalidated snapshot is never
+  // served stale — the semantics the previous react-query placement needed
+  // `fetchQuery` + `staleTime: Infinity` to encode.
+  const snapshots = new Map<
+    string,
+    { epoch: number; promise: Promise<LogsListingSnapshot<TRow>> }
+  >();
+
+  const snapshotKey = (
+    filter: Condition | undefined,
+    orderBy: OrderByModel[] | undefined
+  ): string => JSON.stringify([filter ?? null, orderBy ?? null]);
+
+  const fetchSnapshot = (
+    filter: Condition | undefined,
+    orderBy: OrderByModel[] | undefined,
+    plan: DatabaseListingPlan<TRow>,
+    firstPageSize: number
+  ): Promise<LogsListingSnapshot<TRow>> => {
+    const key = snapshotKey(filter, orderBy);
+    const epoch = logsListingEpoch();
+    const cached = snapshots.get(key);
+    if (cached !== undefined && cached.epoch === epoch) {
+      // Re-insert so eviction order tracks recency, not first insertion.
+      snapshots.delete(key);
+      snapshots.set(key, cached);
+      return cached.promise;
+    }
+    const entry = {
+      epoch,
+      promise: readLogsListingSnapshot(
+        logDir,
+        prefix,
+        toRow,
+        plan,
+        firstPageSize
+      ),
+    };
+    snapshots.delete(key);
+    snapshots.set(key, entry);
+    while (snapshots.size > kSnapshotCacheEntries) {
+      const oldest = snapshots.keys().next().value;
+      if (oldest === undefined) break;
+      snapshots.delete(oldest);
+    }
+    // A failed build must not serve as a durable snapshot ("no items" over
+    // a populated database): evict so the next read rebuilds. Callers see
+    // the rejection; retry policy stays with the react-query layer above.
+    entry.promise.catch(() => {
+      if (snapshots.get(key) === entry) snapshots.delete(key);
+    });
+    return entry.promise;
   };
 
-  if (logsListingSource(logDir) === "cache") {
-    const rows = await scanListingRows(logDir, prefix, toRow, plan);
+  const getPage = async (
+    filter: Condition | undefined,
+    orderBy: OrderByModel[] | undefined,
+    pagination: Pagination
+  ): Promise<LogsListingPageResult<TRow>> => {
+    const plan = compilePlan(filter, orderBy);
+    if (logsListingSource(logDir) === "cache") {
+      // One unpaged read: cache-only rows already live in memory, so a scan
+      // per read stays the simpler, equally-cheap form. No
+      // universe_task_ids: the single page IS the whole universe, so the
+      // anti-join's loaded-window fallback already covers it.
+      return readLogsListing(logDir, prefix, toRow, plan);
+    }
+    const snapshot = await fetchSnapshot(
+      filter,
+      orderBy,
+      plan,
+      pagination.limit
+    );
+    const total = snapshot.total_count;
+    const cursorOffset =
+      pagination.cursor && typeof pagination.cursor.offset === "number"
+        ? pagination.cursor.offset
+        : undefined;
+    const backward = pagination.direction === "backward";
+    const start = backward
+      ? Math.max(0, (cursorOffset ?? total) - pagination.limit)
+      : (cursorOffset ?? 0);
+    const end = backward ? (cursorOffset ?? total) : start + pagination.limit;
+    // The inline first page covers slices from 0 whenever it holds `end`
+    // rows — or the whole (shorter) universe. A cached snapshot built under
+    // another limit falls through to the bulkGet path.
+    const items =
+      start === 0 &&
+      (snapshot.firstPage.length >= end || snapshot.firstPage.length === total)
+        ? snapshot.firstPage.slice(0, end)
+        : await readSnapshotPageRows(snapshot, toRow, plan, start, end - start);
+    return {
+      items,
+      total_count: total,
+      universe_task_ids: snapshot.task_ids,
+      // Cursors index the snapshot's key list (not served-row counts), so a
+      // dropped hole never desyncs subsequent pages.
+      next_cursor: backward
+        ? start > 0
+          ? { offset: start }
+          : null
+        : end < total
+          ? { offset: end }
+          : null,
+    };
+  };
+
+  const getMatches = async (
+    filter: Condition | undefined,
+    orderBy: OrderByModel[] | undefined,
+    find: LogsListingFindQuery<TRow>
+  ): Promise<LogsListingMatch[]> => {
+    const plan = compilePlan(filter, orderBy);
+    const term = find.term.toLowerCase();
+    const toMatch = (row: TRow, offset: number): LogsListingMatch => {
+      const orderValues = orderBy?.length
+        ? Object.fromEntries(
+            orderBy.map(({ column }) => [column, view.getValue(row, column)])
+          )
+        : undefined;
+      const match = { id: find.getRowId(row), offset };
+      return orderValues === undefined ? match : { ...match, orderValues };
+    };
+
+    if (logsListingSource(logDir) === "cache") {
+      const rows = await scanListingRows(logDir, prefix, toRow, plan);
+      const matches: LogsListingMatch[] = [];
+      for (let offset = 0; offset < rows.length; offset++) {
+        const row = rows[offset]!;
+        if (find.rowText(row).includes(term)) {
+          matches.push(toMatch(row, offset));
+        }
+      }
+      return matches;
+    }
+
+    // The match scan doesn't consume the snapshot until the join below, so
+    // overlap the two store reads: on a cold snapshot (first keystroke per
+    // (filter, orderBy), post-invalidation rebuild) each is a full table
+    // scan, and serializing them doubles per-keystroke match latency.
+    // Unsorted scan: order comes from the snapshot's key positions below, so
+    // the plan's full-list sort would be paid per keystroke and discarded.
+    const [snapshot, entries] = await Promise.all([
+      fetchSnapshot(filter, orderBy, plan, find.pageSize),
+      scanListingEntries(logDir, prefix, toRow, plan, { sorted: false }),
+    ]);
+    const offsetByKey = new Map(
+      snapshot.keys.map((key, offset) => [key, offset] as const)
+    );
     const matches: LogsListingMatch[] = [];
-    for (let offset = 0; offset < rows.length; offset++) {
-      const row = rows[offset]!;
-      if (find.rowText(row).includes(term)) {
+    for (const { log, row } of entries) {
+      const offset = offsetByKey.get(log.name);
+      if (offset !== undefined && find.rowText(row).includes(term)) {
         matches.push(toMatch(row, offset));
       }
     }
+    matches.sort((a, b) => a.offset - b.offset);
     return matches;
-  }
+  };
 
-  // The match scan doesn't consume the snapshot until the join below, so
-  // overlap the two store reads: on a stale snapshot (first keystroke per
-  // (filter, orderBy), post-invalidation refetch) each is a full table
-  // scan, and serializing them doubles per-keystroke match latency.
-  // Unsorted scan: order comes from the snapshot's key positions below, so
-  // the plan's full-list sort would be paid per keystroke and discarded.
-  const [snapshot, entries] = await Promise.all([
-    fetchLogsListingSnapshot(query, find.pageSize),
-    scanListingEntries(logDir, prefix, toRow, plan, { sorted: false }),
-  ]);
-  const offsetByKey = new Map(
-    snapshot.keys.map((key, offset) => [key, offset] as const)
-  );
-  const matches: LogsListingMatch[] = [];
-  for (const { log, row } of entries) {
-    const offset = offsetByKey.get(log.name);
-    if (offset !== undefined && find.rowText(row).includes(term)) {
-      matches.push(toMatch(row, offset));
-    }
-  }
-  matches.sort((a, b) => a.offset - b.offset);
-  return matches;
+  return {
+    getPage,
+    getMatches,
+    getOverview: (overview) => readLogsOverview(logDir, overview),
+  };
 };

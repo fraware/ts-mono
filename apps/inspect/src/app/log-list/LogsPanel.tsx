@@ -8,6 +8,7 @@ import { useProperty } from "@tsmono/react/hooks";
 
 import { useLogDir } from "../../app_config";
 import {
+  createLogsListingData,
   imperativeLogData,
   invalidateDatabaseLogsListings,
   useLogsSync,
@@ -111,42 +112,8 @@ export const LogsPanel: FC<LogsPanelProps> = ({
     (log: LogListingRow) => fileLogIdentity(log.name, itemView) !== undefined,
     [itemView]
   );
-  const overviewQuery = useLogsOverview({
-    logDir,
-    universe,
-    view: {
-      folderDir: mode === "logs" ? currentDir : undefined,
-      showRetriedLogs,
-      isCandidate,
-    },
-  });
-  const overview = overviewQuery.data;
 
   const busy = sync.busy;
-  // The navbar bar tracks the sync round-trip only — engine background
-  // fetching (`busy`) stays in the footer/overlay indications.
-  const navbarLoading = sync.loading || overviewQuery.loading;
-
-  // Presentation items with no database record: folders (pinned) and the
-  // eval set's not-yet-run tasks. File rows come from the listing query.
-  const logItems: Array<FolderLogItem | PendingTaskItem> = useMemo(() => {
-    const currentDirRelative = directoryRelativeUrl(currentDir, logDir);
-    const folderItems: Array<FolderLogItem | PendingTaskItem> = (
-      overview?.folders ?? []
-    ).map((folder) => ({
-      id: folder.name,
-      name: folder.name,
-      type: "folder",
-      url: logsUrl(
-        join(folder.name, decodeURIComponent(currentDirRelative)),
-        logDir
-      ),
-      itemCount: folder.itemCount,
-    }));
-    return appendPendingItems(evalSet, new Set(overview?.taskIds), folderItems);
-  }, [overview, evalSet, currentDir, logDir]);
-
-  const hasRetriedLogs = (overview?.retriedCount ?? 0) > 0;
 
   // In the folder view, scope the Metrics list to logs under the current
   // directory so descending into a subfolder shows only that folder's metrics.
@@ -183,20 +150,70 @@ export const LogsPanel: FC<LogsPanelProps> = ({
     [itemView]
   );
 
-  // One descriptor shared by the row query (useLogListData) and the grid's
-  // find-band match query, so they can never disagree about the universe.
-  const listing = useMemo<LogsListingDescriptor<LogListRow>>(
-    () => ({
-      logDir,
-      // Match the row universe: folder mode lists the current directory, the
-      // flat tasks view lists the whole log dir (like `scopeDir` above) — a
-      // narrower scan prefix would silently drop matching rows outside it.
-      prefix: mode === "logs" ? currentDir : logDir,
-      universe,
-      toRow,
-    }),
-    [logDir, mode, currentDir, universe, toRow]
+  // The view's listing data access. Memoized on the view inputs: a changed
+  // view or accessor schema constructs a fresh instance with a fresh
+  // internal cache (see createLogsListingData).
+  const listingData = useMemo(
+    () =>
+      createLogsListingData<LogListRow>({
+        logDir,
+        // Match the row universe: folder mode lists the current directory,
+        // the flat tasks view lists the whole log dir (like `scopeDir`
+        // above) — a narrower scan prefix would silently drop matching rows
+        // outside it.
+        prefix: mode === "logs" ? currentDir : logDir,
+        toRow,
+        getValue,
+        getComparator,
+        getFilterType,
+      }),
+    [logDir, mode, currentDir, toRow, getValue, getComparator, getFilterType]
   );
+
+  // One descriptor shared by the row query (useLogListData) and the grid's
+  // find-band match query, so they can never disagree about the universe —
+  // and so both read through one instance (sharing its snapshot cache).
+  const listing = useMemo<LogsListingDescriptor<LogListRow>>(
+    () => ({ universe, data: listingData }),
+    [universe, listingData]
+  );
+
+  const overviewQuery = useLogsOverview({
+    logDir,
+    universe,
+    data: listingData,
+    view: {
+      folderDir: mode === "logs" ? currentDir : undefined,
+      showRetriedLogs,
+      isCandidate,
+    },
+  });
+  const overview = overviewQuery.data;
+
+  // The navbar bar tracks the sync round-trip only — engine background
+  // fetching (`busy`) stays in the footer/overlay indications.
+  const navbarLoading = sync.loading || overviewQuery.loading;
+
+  // Presentation items with no database record: folders (pinned) and the
+  // eval set's not-yet-run tasks. File rows come from the listing query.
+  const logItems: Array<FolderLogItem | PendingTaskItem> = useMemo(() => {
+    const currentDirRelative = directoryRelativeUrl(currentDir, logDir);
+    const folderItems: Array<FolderLogItem | PendingTaskItem> = (
+      overview?.folders ?? []
+    ).map((folder) => ({
+      id: folder.name,
+      name: folder.name,
+      type: "folder",
+      url: logsUrl(
+        join(folder.name, decodeURIComponent(currentDirRelative)),
+        logDir
+      ),
+      itemCount: folder.itemCount,
+    }));
+    return appendPendingItems(evalSet, new Set(overview?.taskIds), folderItems);
+  }, [overview, evalSet, currentDir, logDir]);
+
+  const hasRetriedLogs = (overview?.retriedCount ?? 0) > 0;
 
   const listData = useLogListData({
     overlayItems: logItems,
