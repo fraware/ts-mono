@@ -502,10 +502,51 @@ export interface LogsListingData<TRow> {
   getOverview(options: LogsOverviewOptions): Promise<LogsOverview>;
 }
 
-/** The active query's snapshot plus the previous one, which may still be
- *  serving placeholder rows; a changed filter or sort rescans anyway. The
- *  overview doesn't consume snapshots, so it can't thrash these slots. */
+/** The active query's entry plus the previous one, which may still be
+ *  serving placeholder rows; a changed filter or sort rescans anyway.
+ *  Sizes both per-instance caches (snapshots, Find match contexts). The
+ *  overview doesn't consume either, so it can't thrash the slots. */
 const kSnapshotCacheEntries = 2;
+
+/**
+ * An epoch-stamped, promise-valued LRU — the shape the instance's listing
+ * caches share (the snapshot cache, Find's match-context cache). Promise-
+ * valued so concurrent reads of one key dedupe into a single build.
+ * Entries are epoch-stamped (see logsListingEpoch): a bumped epoch means
+ * the next read rebuilds and awaits, so an invalidated entry is never
+ * served stale — the semantics the previous react-query placement needed
+ * `fetchQuery` + `staleTime: Infinity` to encode. A failed build must not
+ * serve as a durable success ("no items" over a populated database): it
+ * evicts so the next read rebuilds — callers see the rejection; retry
+ * policy stays with the react-query layer above.
+ */
+const epochStampedCache = <T>(
+  maxEntries: number
+): ((key: string, build: () => Promise<T>) => Promise<T>) => {
+  const entries = new Map<string, { epoch: number; promise: Promise<T> }>();
+  return (key, build) => {
+    const epoch = logsListingEpoch();
+    const cached = entries.get(key);
+    if (cached !== undefined && cached.epoch === epoch) {
+      // Re-insert so eviction order tracks recency, not first insertion.
+      entries.delete(key);
+      entries.set(key, cached);
+      return cached.promise;
+    }
+    const entry = { epoch, promise: build() };
+    entries.delete(key);
+    entries.set(key, entry);
+    while (entries.size > maxEntries) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) break;
+      entries.delete(oldest);
+    }
+    entry.promise.catch(() => {
+      if (entries.get(key) === entry) entries.delete(key);
+    });
+    return entry.promise;
+  };
+};
 
 /**
  * Create the log listing's data access over today's storage: the two-tier
@@ -534,64 +575,47 @@ export const createLogsListingData = (
       getFilterType: schema.getFilterType,
     });
 
-  // The snapshot cache. Promise-valued so concurrent page and Find reads of
-  // one (filter, orderBy) dedupe into a single scan; keyed by the
-  // serialized query values — the filter condition's value IS the cache
-  // identity (`toJSON` is deterministic for a given construction; an
-  // equivalent condition built differently just misses and rescans).
-  // Entries are epoch-stamped (see logsListingEpoch): a bumped epoch means
-  // the next read rebuilds and awaits, so an invalidated snapshot is never
-  // served stale — the semantics the previous react-query placement needed
-  // `fetchQuery` + `staleTime: Infinity` to encode.
-  const snapshots = new Map<
-    string,
-    { epoch: number; promise: Promise<LogsListingSnapshot> }
-  >();
-
+  // Both caches key by the serialized query values — the filter
+  // condition's value IS the cache identity (`toJSON` is deterministic for
+  // a given construction; an equivalent condition built differently just
+  // misses and rescans).
   const snapshotKey = (
     filter: Condition | undefined,
     orderBy: OrderByModel[] | undefined
   ): string => JSON.stringify([filter ?? null, orderBy ?? null]);
+
+  const snapshots = epochStampedCache<LogsListingSnapshot>(
+    kSnapshotCacheEntries
+  );
 
   const fetchSnapshot = (
     filter: Condition | undefined,
     orderBy: OrderByModel[] | undefined,
     plan: DatabaseListingPlan<LogListingRow>,
     firstPageSize: number
-  ): Promise<LogsListingSnapshot> => {
-    const key = snapshotKey(filter, orderBy);
-    const epoch = logsListingEpoch();
-    const cached = snapshots.get(key);
-    if (cached !== undefined && cached.epoch === epoch) {
-      // Re-insert so eviction order tracks recency, not first insertion.
-      snapshots.delete(key);
-      snapshots.set(key, cached);
-      return cached.promise;
-    }
-    const entry = {
-      epoch,
-      promise: readLogsListingSnapshot(
+  ): Promise<LogsListingSnapshot> =>
+    snapshots(snapshotKey(filter, orderBy), () =>
+      readLogsListingSnapshot(
         logDir,
         scanScopeFromFilter(logDir, filter),
         plan,
         firstPageSize
-      ),
-    };
-    snapshots.delete(key);
-    snapshots.set(key, entry);
-    while (snapshots.size > kSnapshotCacheEntries) {
-      const oldest = snapshots.keys().next().value;
-      if (oldest === undefined) break;
-      snapshots.delete(oldest);
-    }
-    // A failed build must not serve as a durable snapshot ("no items" over
-    // a populated database): evict so the next read rebuilds. Callers see
-    // the rejection; retry policy stays with the react-query layer above.
-    entry.promise.catch(() => {
-      if (snapshots.get(key) === entry) snapshots.delete(key);
-    });
-    return entry.promise;
-  };
+      )
+    );
+
+  // Find's term-independent inputs, cached beside the snapshot under the
+  // same key and epoch semantics (the invalidation story is identical):
+  // the match scan (a full store read + retried grouping + filter pass)
+  // and the snapshot-offset map change only when the data or the query
+  // changes, while the term changes per debounced keystroke — only the
+  // `.includes(term)` pass depends on it. Without this, typing an 8-char
+  // term over a 10k-log dir pays ~7 redundant full scans. Cost: the last
+  // find's filtered records stay retained until the next epoch bump or
+  // LRU eviction.
+  const matchContexts = epochStampedCache<{
+    records: LogListingRow[];
+    offsetByKey: Map<string, number>;
+  }>(kSnapshotCacheEntries);
 
   const getPage = async (
     filter: Condition | undefined,
@@ -684,18 +708,26 @@ export const createLogsListingData = (
       return matches;
     }
 
-    // The match scan doesn't consume the snapshot until the join below, so
-    // overlap the two store reads: on a cold snapshot (first keystroke per
-    // (filter, orderBy), post-invalidation rebuild) each is a full table
-    // scan, and serializing them doubles per-keystroke match latency.
-    // Unsorted scan: order comes from the snapshot's key positions below, so
-    // the plan's full-list sort would be paid per keystroke and discarded.
-    const [snapshot, records] = await Promise.all([
-      fetchSnapshot(filter, orderBy, plan, find.pageSize),
-      scanListingRecords(logDir, scope, plan, { sorted: false }),
-    ]);
-    const offsetByKey = new Map(
-      snapshot.keys.map((key, offset) => [key, offset] as const)
+    const { records, offsetByKey } = await matchContexts(
+      snapshotKey(filter, orderBy),
+      async () => {
+        // The match scan doesn't consume the snapshot until the offset-map
+        // build, so overlap the two store reads: on a cold snapshot (first
+        // find per (filter, orderBy), post-invalidation rebuild) each is a
+        // full table scan, and serializing them doubles the latency.
+        // Unsorted scan: order comes from the snapshot's key positions, so
+        // the plan's full-list sort would be built and discarded.
+        const [snapshot, records] = await Promise.all([
+          fetchSnapshot(filter, orderBy, plan, find.pageSize),
+          scanListingRecords(logDir, scope, plan, { sorted: false }),
+        ]);
+        return {
+          records,
+          offsetByKey: new Map(
+            snapshot.keys.map((key, offset) => [key, offset] as const)
+          ),
+        };
+      }
     );
     const matches: LogsListingMatch[] = [];
     for (const log of records) {

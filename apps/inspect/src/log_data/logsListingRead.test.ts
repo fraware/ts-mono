@@ -965,4 +965,66 @@ describe("LogsListingData.getMatches", () => {
       },
     ]);
   });
+
+  test("per-term match queries reuse one scan; an epoch bump rescans", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task: "alpha", task_id: "t-a" }),
+      "/test/logs/b.json": preview({ task: "beta", task_id: "t-b" }),
+    });
+    const readLogsSpy = vi.spyOn(databaseService, "readLogs");
+    const query = (term: string) => ({
+      pageSize: 10,
+      term,
+      searchColumns: ["task"],
+    });
+
+    // Only the `.includes(term)` pass depends on the term: the store scan,
+    // retried grouping, and offset map are cached beside the snapshot, so a
+    // debounced keystroke sequence must not pay a full scan per term.
+    const data = createData();
+    const first = await data.getMatches(undefined, undefined, query("alpha"));
+    expect(first.map((match) => match.id)).toEqual(["/test/logs/a.json"]);
+    expect(readLogsSpy).toHaveBeenCalledTimes(2); // snapshot + match scan
+
+    const second = await data.getMatches(undefined, undefined, query("beta"));
+    expect(second.map((match) => match.id)).toEqual(["/test/logs/b.json"]);
+    expect(readLogsSpy).toHaveBeenCalledTimes(2);
+
+    // A replication write bumps the epoch: the cached scan must not serve
+    // stale rows to the next keystroke.
+    await databaseService.writeLogPreviews({
+      "/test/logs/c.json": preview({ task: "beta-two", task_id: "t-c" }),
+    });
+    bumpLogsListingEpoch();
+    const rescanned = await data.getMatches(
+      undefined,
+      undefined,
+      query("beta")
+    );
+    expect(rescanned.map((match) => match.id).sort()).toEqual([
+      "/test/logs/b.json",
+      "/test/logs/c.json",
+    ]);
+    expect(readLogsSpy.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  test("a failed match scan is not cached as a durable empty result", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task: "alpha", task_id: "t-a" }),
+    });
+    const query = { pageSize: 10, term: "alpha", searchColumns: ["task"] };
+
+    // `readLogs` swallowing a store error to null rejects the scan (see
+    // scanRows); the cache must evict the rejected build so the next
+    // keystroke retries instead of serving "no matches" forever.
+    vi.spyOn(databaseService, "readLogs").mockResolvedValue(null);
+    const data = createData();
+    await expect(data.getMatches(undefined, undefined, query)).rejects.toThrow(
+      /listing/i
+    );
+
+    vi.restoreAllMocks();
+    const recovered = await data.getMatches(undefined, undefined, query);
+    expect(recovered.map((match) => match.id)).toEqual(["/test/logs/a.json"]);
+  });
 });
