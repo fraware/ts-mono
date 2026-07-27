@@ -85,9 +85,15 @@
 >   listing root (throttled), not just listings whose scope contains the
 >   written file — equivalent with one grid mounted, wasteful once several
 >   scopes hold cached listings.
-> - The columns schema (`useScoreSchema` / `hasSampleLimits` in
->   `grid/columns/hooks.tsx`) — the last full-list subscriber on the list
->   page, a candidate for another overview-style aggregate.
+> - ~~The columns schema (`useScoreSchema` / `hasSampleLimits` in
+>   `grid/columns/hooks.tsx`)~~ — landed as `readLogsColumnFacts` +
+>   `useLogColumnFacts`: an overview-style aggregate (scorer map +
+>   sampleLimits presence in one scan, subtree-scoped, retried runs
+>   included). Deliberately not a `LogsListingData` method — instances are
+>   constructed *with* the schema these facts produce, so the read sits
+>   upstream and consumes raw records only. The list page's last full-row
+>   mirror subscriber is now the samples panel (`useLogListing` in
+>   `SamplesPanel`), i.e. the samples halves below.
 > - Step 6 cleanup.
 
 The `/tasks`, `/logs`, and `/samples` pages sort and filter via `Condition` /
