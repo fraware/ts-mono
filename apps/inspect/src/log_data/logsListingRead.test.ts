@@ -21,7 +21,10 @@ import {
 } from "../client/database/service";
 
 import { applyListingQuery } from "./listing/applyListingQuery";
-import { createLogColumnSchema } from "./listing/logColumnSchema";
+import {
+  createLogColumnSchema,
+  parentDirCondition,
+} from "./listing/logColumnSchema";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
 import { setRows, writeListing } from "./logsContent";
 import { bumpLogsListingEpoch } from "./logsListingEpoch";
@@ -203,6 +206,28 @@ describe("listing reads", () => {
     // The scan derives from the condition rather than arriving as a second,
     // manually-coordinated input — and pins the stored parent_dir index
     // (exactly the direct children) rather than ranging over the subtree.
+    expect(readLogsSpy).toHaveBeenCalledWith({ parentDir: "/test/logs/sub" });
+  });
+
+  test("parentDirCondition normalizes a slash-terminated directory", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/sub/b.json": preview({ task_id: "t-b" }),
+    });
+    const readLogsSpy = vi.spyOn(databaseService, "readLogs");
+
+    // Both the index scan and the plan's in-memory re-check compare the
+    // stored `dirname` form (never slash-terminated); the condition builder
+    // owns that normalization, so a directory path with a trailing slash
+    // must still list its children instead of silently matching nothing.
+    const page = await createData("/test/logs").getPage(
+      parentDirCondition("/test/logs/sub/"),
+      undefined,
+      wholePage
+    );
+
+    expect(page.items.map((row) => row.name)).toEqual([
+      "/test/logs/sub/b.json",
+    ]);
     expect(readLogsSpy).toHaveBeenCalledWith({ parentDir: "/test/logs/sub" });
   });
 

@@ -1,3 +1,4 @@
+import { Column, type Condition } from "@tsmono/inspect-common/query";
 import type { FilterType } from "@tsmono/inspect-components/columnFilter";
 import { basename, dirname, formatPrettyDecimal } from "@tsmono/util";
 
@@ -212,6 +213,17 @@ const kStaticColumns: Record<string, ColumnSemantics | undefined> = {
     filterType: "boolean",
   },
 };
+
+/**
+ * The folder view's direct-children membership condition. Build it here
+ * rather than hand-writing `new Column("parent_dir").eq(dir)`: the equality
+ * compares against `dirname(log.name)` — never slash-terminated, and the
+ * stored `parent_dir` index holds the same form — so this owns the
+ * trailing-slash normalization a caller's directory path may carry. A
+ * slash-terminated value built elsewhere would silently match nothing.
+ */
+export const parentDirCondition = (dir: string): Condition =>
+  new Column("parent_dir").eq(dir.replace(/\/$/, ""));
 
 const kScorePrefix = "score_";
 const kMetricPrefix = "metric_";

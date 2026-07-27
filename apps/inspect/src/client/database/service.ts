@@ -131,13 +131,15 @@ export class DatabaseService {
       }
 
       const db = this.getDb();
-      // Trailing slash stripped to match the stored `dirname` form (the
-      // same normalization `isInDirectory` applies to its directory).
+      // `parentDir` must already be the stored `dirname` form (no trailing
+      // slash) — `parentDirCondition` owns that normalization. Stripping a
+      // slash here too would split the rule across layers: the listing
+      // plan's in-memory re-check compares the raw condition value, so a
+      // slash-terminated value this layer quietly fixed up would scan the
+      // right rows and then reject every one of them.
       const records = await (
         "parentDir" in scope
-          ? db.logs
-              .where("parent_dir")
-              .equals(scope.parentDir.replace(/\/$/, ""))
+          ? db.logs.where("parent_dir").equals(scope.parentDir)
           : db.logs.where("file_path").startsWith(scopePrefix(scope.prefix))
       ).toArray();
 

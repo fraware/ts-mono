@@ -13,6 +13,7 @@ import {
   createLogsListingData,
   imperativeLogData,
   invalidateDatabaseLogsListings,
+  parentDirCondition,
   useLogsSync,
   type LogListingRow,
   type LogsOverview,
@@ -95,12 +96,7 @@ export const LogsPanel: FC<LogsPanelProps> = ({
   // useLogListData; the data layer derives its scan prefix from the
   // parent_dir term.
   const scopeFilter = useMemo<Condition | undefined>(() => {
-    const dir =
-      mode === "logs"
-        ? new Column("parent_dir").eq(
-            currentDir.endsWith("/") ? currentDir.slice(0, -1) : currentDir
-          )
-        : undefined;
+    const dir = mode === "logs" ? parentDirCondition(currentDir) : undefined;
     const retried = showRetriedLogs
       ? undefined
       : new Column("retried").eq(false);

@@ -120,6 +120,7 @@ export {
   createLogColumnSchema,
   dateCompare,
   numberCompare,
+  parentDirCondition,
   type LogColumnSchema,
 } from "./listing/logColumnSchema";
 export { createListingPlan } from "./listing/planner";
