@@ -8,24 +8,25 @@ import { useLogDir } from "../../../../app_config";
 import { scopePrefix } from "../../../../client/database";
 import { kModelNone } from "../../../../constants";
 import {
+  createLogColumnSchema,
+  dateCompare,
+  numberCompare,
   useLogListing,
   useScoreSchema,
+  type LogColumnSchema,
   type LogListingRow,
   type ScorerMap,
+  type ValueComparator,
 } from "../../../../log_data";
 import { useStore } from "../../../../state/store";
 import { parseLogFileName } from "../../../../utils/evallog";
 import { formatDateTime, formatTime } from "../../../../utils/format";
 import { ApplicationIcons } from "../../../appearance/icons";
-import {
-  ColumnComparator,
-  ExtendedColumnDef,
-} from "../../../shared/data-grid/columnTypes";
+import { ExtendedColumnDef } from "../../../shared/data-grid/columnTypes";
 import sharedStyles from "../../../shared/gridCells.module.css";
 import { type PickerColumn } from "../../../shared/gridUtils";
 
 import localStyles from "./columns.module.css";
-import { dateCompare, numberCompare } from "./comparators";
 import { completedAtValue } from "./completedAt";
 import { LogListRow } from "./types";
 
@@ -90,17 +91,21 @@ export const useLogListColumns = (
    *  checkboxes for the currently active view mode. A lightweight shim
    *  (`colId` + `headerName`) of the full column defs. */
   pickerColumns: PickerColumn[];
-  /** Reads a row's raw value for a column id (for client-side filter/sort). */
+  /** Reads a shaped row's raw value for a column id. For overlay rows
+   *  (folders, pending tasks) and display concerns only — stored records
+   *  are evaluated by the data layer through `schema`. */
   getValue: (row: LogListRow, columnId: string) => unknown;
-  /** Per-column value comparator (from column meta) for client-side sort. */
-  getComparator: (columnId: string) => ColumnComparator | undefined;
-  /** Per-column filter type (from column meta) for client-side filtering. */
+  /** The data-layer column semantics (see `createLogColumnSchema`): the
+   *  source of truth for comparators and filter types, exposed here so the
+   *  grid's display config and the overlay's in-memory evaluation can't
+   *  drift from what the listing data computes. */
+  schema: LogColumnSchema;
+  /** `schema.getComparator` (per-column sort semantics). */
+  getComparator: (columnId: string) => ValueComparator | undefined;
+  /** `schema.getFilterType` (type-aware filter coercion and editors). */
   getFilterType: (columnId: string) => FilterType | undefined;
-  /** Cache identity of the accessors above: the scorer schema they're built
-   *  from. The schema arrives asynchronously, so a query that closes over
-   *  the accessors must carry this in its key — score-column semantics
-   *  (by-metric accessors, numeric comparators/filter types) change when it
-   *  lands, with no other query input changing. */
+  /** `schema.key` — the scorer schema arrives asynchronously, so a query
+   *  evaluated through the schema must carry this in its key. */
   accessorsKey: string;
   setColumnVisibility: (visibility: Record<string, boolean>) => void;
 } => {
@@ -115,6 +120,7 @@ export const useLogListColumns = (
   // listing loads there are simply no scorer columns yet, and listing errors
   // render in LogsPanel's error surface.
   const scorerMap = useScoreSchema(logDir, scopeDir).data ?? kNoScorerMap;
+  const schema = useMemo(() => createLogColumnSchema(scorerMap), [scorerMap]);
 
   const allColumns = useMemo((): LogListColumn[] => {
     const baseColumns: LogListColumn[] = [
@@ -754,23 +760,20 @@ export const useLogListColumns = (
     }
 
     // Every column except the type icon is filterable (matches origin/main's
-    // `defaultColDef.filter: true` with the type column opted out). Derive the
-    // filter type from the sort comparator: numeric / date columns get their
-    // typed editors; everything else filters as text.
+    // `defaultColDef.filter: true` with the type column opted out). Filter
+    // types come from the data-layer schema, so the filter editors always
+    // match how the listing data coerces and compares the column.
     for (const col of allCols) {
       if (col.id === "type") continue;
-      const cmp = col.meta?.sortComparator;
-      const filterType: FilterType =
-        cmp === numberCompare
-          ? "number"
-          : cmp === dateCompare
-            ? "date"
-            : "string";
-      col.meta = { ...col.meta, filterable: true, filterType };
+      col.meta = {
+        ...col.meta,
+        filterable: true,
+        filterType: schema.getFilterType(col.id ?? "") ?? "string",
+      };
     }
 
     return allCols;
-  }, [scorerMap, mode]);
+  }, [scorerMap, mode, schema]);
 
   // Auto-promote `sampleLimits` to default-visible when any in-scope log
   // has a sample that ended with a limit (an ingestion-derived header fact).
@@ -846,8 +849,7 @@ export const useLogListColumns = (
     // eslint-disable-next-line react-hooks/exhaustive-deps -- matchesActiveMode is recreated each render but is safe to exclude
   }, [allColumns, viewMode]);
 
-  // Lookup by column id for the client-side listing query's value/comparator
-  // accessors.
+  // Lookup by column id for the overlay rows' value accessor.
   const columnsById = useMemo(() => {
     const byId = new Map<string, LogListColumn>();
     for (const col of allColumns) {
@@ -867,38 +869,15 @@ export const useLogListColumns = (
     [columnsById]
   );
 
-  const getComparator = useCallback(
-    (columnId: string): ColumnComparator | undefined =>
-      columnsById.get(columnId)?.meta?.sortComparator,
-    [columnsById]
-  );
-
-  const getFilterType = useCallback(
-    (columnId: string): FilterType | undefined =>
-      columnsById.get(columnId)?.meta?.filterType,
-    [columnsById]
-  );
-
-  // Everything the accessors read beyond the row and the column id: the
-  // scorer schema (`mode` also shapes the column set, but only in ways the
-  // accessors don't observe — and it's part of the listing universe anyway).
-  const accessorsKey = useMemo(
-    () =>
-      Object.entries(scorerMap)
-        .map(([key, { valueType }]) => `${key}:${valueType}`)
-        .sort()
-        .join(","),
-    [scorerMap]
-  );
-
   return {
     columns: allColumns,
     visibility,
     pickerColumns,
     getValue,
-    getComparator,
-    getFilterType,
-    accessorsKey,
+    schema,
+    getComparator: schema.getComparator,
+    getFilterType: schema.getFilterType,
+    accessorsKey: schema.key,
     setColumnVisibility,
   };
 };

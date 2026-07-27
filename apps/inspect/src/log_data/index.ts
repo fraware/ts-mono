@@ -101,7 +101,6 @@ export {
 export {
   createLogsListingData,
   readLogsOverview,
-  type ListingEntry,
   type LogsListingData,
   type LogsListingFindQuery,
   type LogsListingMatch,
@@ -111,7 +110,18 @@ export {
   type LogsOverview,
   type LogsOverviewOptions,
 } from "./logsListingRead";
+export {
+  applyListingQuery,
+  mergeSortedRows,
+} from "./listing/applyListingQuery";
 export { evaluateCondition, compareByOrderBy } from "./listing/evaluator";
+export {
+  completedAtFallback,
+  createLogColumnSchema,
+  dateCompare,
+  numberCompare,
+  type LogColumnSchema,
+} from "./listing/logColumnSchema";
 export { createListingPlan } from "./listing/planner";
 export type {
   FilterTypeAccessor,

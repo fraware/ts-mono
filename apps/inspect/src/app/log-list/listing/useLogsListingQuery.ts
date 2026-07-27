@@ -20,9 +20,11 @@ import type {
   ValueAccessor,
   ValueComparator,
 } from "../../../log_data";
-import { databaseLogsListingKey, listingKeyScope } from "../../../log_data";
-
-import { applyListingQuery } from "./applyListingQuery";
+import {
+  applyListingQuery,
+  databaseLogsListingKey,
+  listingKeyScope,
+} from "../../../log_data";
 
 /** TanStack `SortingState` → API `OrderBy[]`. Mirrors scout's helper. */
 export const sortingStateToOrderBy = (sorting: SortingState): OrderByModel[] =>

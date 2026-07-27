@@ -1,7 +1,8 @@
 # A data access interface for the log listing
 
-Status: accepted — implementation in progress on this branch (see
-"Implementation phases"). Companion to
+Status: implemented on this branch (all three phases — see
+"Implementation phases", including where the outcome exceeded the plan).
+Companion to
 [db-backed-listing-plan.md](db-backed-listing-plan.md), which documents the
 paginated listing as it currently exists on this branch.
 
@@ -424,6 +425,21 @@ condition columns and searchable text it needs are expressible as data.
 So the exit paths aren't just cleanliness — they're prerequisites for one
 of the futures this interface exists to allow.
 
+**Outcome (phase 3): the residue collapsed further than planned.**
+`buildLogListRow` turned out to be a pure projection — every data column
+reads off ingestion-derived record fields — so the column-semantics module
+(`createLogColumnSchema`) could be written entirely over stored records,
+score/metric columns included (they resolve dynamically by name shape from
+the scorer map, never pre-expanded). Evaluation therefore never touches
+shaped rows or view accessors at all: the instance is constructed from
+just `(logDir, schema)`, per-call accessors never happened, and the
+"resolver" is simply the schema's own resolution (membership columns,
+declared data columns, raw-field fallback for unknown ids). What still
+crosses the interface as functions is exactly `getMatches`' pair —
+`rowText` (formatted on-screen text) and `getRowId` (view row identity) —
+the acknowledged wart above, now the *only* serialization blocker on a
+server-backed implementation.
+
 ## What we are deliberately not doing yet
 
 - **Declaring the full column schema.** Score columns are an open-ended
@@ -525,7 +541,7 @@ Each phase lands independently green:
 3. **Column semantics and the resolver.** Extract the column-semantics
    module from `useLogListColumns`; move the evaluation machinery
    (`evaluator.ts`, `planner.ts`, `applyListingQuery`) into the data
-   layer; the evaluator resolves record-level columns against stored
-   records first, falling back to the schema-driven accessors over shaped
-   rows; `getPage` switches to records-out with shaping lifted into the
-   view.
+   layer; `getPage` switches to records-out with shaping lifted into the
+   view. As landed, the schema came out fully record-level, so the
+   planned shaped-row fallback was never needed — see the outcome note in
+   "Two kinds of column names".

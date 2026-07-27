@@ -38,7 +38,6 @@ import {
   type FileLogItemView,
 } from "./fileLogItem";
 import { useLogListColumns, type ScoresViewMode } from "./grid/columns/hooks";
-import type { LogListRow } from "./grid/columns/types";
 import { LogListGrid } from "./grid/LogListGrid";
 import { buildLogListRow } from "./grid/logListRow";
 import { useLogListData } from "./grid/useLogListData";
@@ -148,10 +147,13 @@ export const LogsPanel: FC<LogsPanelProps> = ({
     getValue,
     getComparator,
     getFilterType,
+    schema,
     accessorsKey,
   } = useLogListColumns(mode, scopeDir, scoresViewMode);
 
-  const toRow = useCallback(
+  // Shape a queried record into its display row — applied per loaded page
+  // above the data interface (in useLogListData and the grid's find band).
+  const shapeRow = useCallback(
     (log: LogListingRow) => {
       const item = fileLogItem(log, itemView);
       return item === undefined ? undefined : buildLogListRow(item);
@@ -160,25 +162,18 @@ export const LogsPanel: FC<LogsPanelProps> = ({
   );
 
   // The view's listing data access. Memoized on the view inputs: a changed
-  // view or accessor schema constructs a fresh instance with a fresh
-  // internal cache (see createLogsListingData).
+  // dir or column schema constructs a fresh instance with a fresh internal
+  // cache (see createLogsListingData).
   const listingData = useMemo(
-    () =>
-      createLogsListingData<LogListRow>({
-        logDir,
-        toRow,
-        getValue,
-        getComparator,
-        getFilterType,
-      }),
-    [logDir, toRow, getValue, getComparator, getFilterType]
+    () => createLogsListingData({ logDir, schema }),
+    [logDir, schema]
   );
 
   // One descriptor shared by the row query (useLogListData) and the grid's
   // find-band match query, so they can never disagree about the row
   // universe — and so both read through one instance (sharing its snapshot
   // cache).
-  const listing = useMemo<LogsListingDescriptor<LogListRow>>(
+  const listing = useMemo<LogsListingDescriptor<LogListingRow>>(
     () => ({ scopeKey, data: listingData }),
     [scopeKey, listingData]
   );
@@ -227,6 +222,7 @@ export const LogsPanel: FC<LogsPanelProps> = ({
     getComparator,
     getFilterType,
     accessorsKey,
+    shapeRow,
     listing,
   });
 
@@ -429,6 +425,7 @@ export const LogsPanel: FC<LogsPanelProps> = ({
                 mode={mode}
                 busy={listBusy}
                 listing={listing}
+                shapeRow={shapeRow}
                 hasMoreRows={listData.hasMoreRows}
                 fetchMoreRows={listData.fetchMoreRows}
                 ensureFileOffsetLoaded={listData.ensureFileOffsetLoaded}

@@ -20,7 +20,8 @@ import type {
 import { FindBandUI, useFindBandShortcut } from "@tsmono/react/components";
 import { useProperty } from "@tsmono/react/hooks";
 
-import { compareByOrderBy } from "../../../log_data";
+import { compareByOrderBy, mergeSortedRows } from "../../../log_data";
+import type { LogListingRow } from "../../../log_data";
 import { useLogsListing } from "../../../state/hooks";
 import { DataGrid } from "../../shared/data-grid/DataGrid";
 import {
@@ -29,7 +30,6 @@ import {
   rowSearchText,
 } from "../../shared/data-grid/findMatches";
 import gridStyles from "../../shared/gridCells.module.css";
-import { mergeSortedRows } from "../listing/applyListingQuery";
 import {
   useLogsListingMatches,
   type LogsListingDescriptor,
@@ -79,7 +79,11 @@ interface LogListGridProps {
   /** The listing source the rows were queried from — the find band runs its
    *  match query against the same universe (so matches cover rows beyond
    *  the loaded page once the listing paginates). */
-  listing: LogsListingDescriptor<LogListRow>;
+  listing: LogsListingDescriptor<LogListingRow>;
+  /** Shape a queried record into its display row (the same function
+   *  `useLogListData` shapes pages with) — the find band's match text and
+   *  ids are display-level, but the match scan runs over records. */
+  shapeRow: (log: LogListingRow) => LogListRow | undefined;
   /** More file rows exist beyond the loaded pages (from `useLogListData`). */
   hasMoreRows: boolean;
   /** Load the next page of file rows (in-flight-safe). */
@@ -102,6 +106,7 @@ export const LogListGrid: FC<LogListGridProps> = ({
   mode = "logs",
   busy,
   listing,
+  shapeRow,
   hasMoreRows,
   fetchMoreRows,
   ensureFileOffsetLoaded,
@@ -223,11 +228,19 @@ export const LogListGrid: FC<LogListGridProps> = ({
     () => searchColumns.map((col) => col.id ?? ""),
     [searchColumns]
   );
+  // The match scan runs over stored records; searchable text and match ids
+  // are display-level, so shape per record here (above the data interface).
   const rowText = useCallback(
-    (row: LogListRow) => rowSearchText(row, searchColumns),
-    [searchColumns]
+    (log: LogListingRow) => {
+      const row = shapeRow(log);
+      return row === undefined ? "" : rowSearchText(row, searchColumns);
+    },
+    [shapeRow, searchColumns]
   );
-  const getRowId = useCallback((row: LogListRow) => row.id, []);
+  const getRowId = useCallback(
+    (log: LogListingRow) => shapeRow(log)?.id ?? log.name,
+    [shapeRow]
+  );
 
   // Match membership is data-level, computed against the listing source
   // under the same universe + filter + sort as the rows — so matches keep

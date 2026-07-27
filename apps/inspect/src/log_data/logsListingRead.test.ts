@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { Column } from "@tsmono/inspect-common/query";
 import type { Condition, OrderByModel } from "@tsmono/inspect-common/query";
 
-import { applyListingQuery } from "../app/log-list/listing/applyListingQuery";
 import type { Log, LogPreview } from "../client/api/types";
 import { DB_NAME } from "../client/database/schema";
 import {
@@ -21,6 +20,8 @@ import {
   type DatabaseService,
 } from "../client/database/service";
 
+import { applyListingQuery } from "./listing/applyListingQuery";
+import { createLogColumnSchema } from "./listing/logColumnSchema";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
 import { setRows, writeListing } from "./logsContent";
 import { bumpLogsListingEpoch } from "./logsListingEpoch";
@@ -29,7 +30,6 @@ import {
   readLogsOverview,
   type LogsListingData,
   type LogsListingPageResult,
-  type LogsListingView,
 } from "./logsListingRead";
 
 const holder = vi.hoisted(() => {
@@ -59,16 +59,14 @@ const preview = (overrides: Partial<LogPreview>): LogPreview => ({
 const getValue = (row: Log, column: string): unknown =>
   row[column as keyof Log];
 
+/** The real schema with no scorer columns — what queries evaluate through. */
+const schema = createLogColumnSchema({});
+
 describe("listing reads", () => {
   let databaseService: DatabaseService;
 
-  const createData = (logDir: string): LogsListingData<Log> =>
-    createLogsListingData<Log>({
-      logDir,
-      toRow: (log: LogListingRow) => log,
-      getValue,
-      getComparator: () => undefined,
-    });
+  const createData = (logDir: string): LogsListingData<LogListingRow> =>
+    createLogsListingData({ logDir, schema });
 
   const wholePage = { cursor: null, direction: "forward", limit: 100 } as const;
 
@@ -248,18 +246,8 @@ describe("listing reads", () => {
 describe("LogsListingData.getPage", () => {
   let databaseService: DatabaseService;
 
-  const identityRow = (log: LogListingRow): Log => log;
-
-  const createData = (
-    overrides?: Partial<LogsListingView<Log>>
-  ): LogsListingData<Log> =>
-    createLogsListingData<Log>({
-      logDir: "/test/logs",
-      toRow: identityRow,
-      getValue,
-      getComparator: () => undefined,
-      ...overrides,
-    });
+  const createData = (logDir = "/test/logs"): LogsListingData<LogListingRow> =>
+    createLogsListingData({ logDir, schema });
 
   /** Walk every page of the paged path (the grid's fetchNextPage loop). */
   const collectPages = async (
@@ -675,7 +663,7 @@ describe("LogsListingData.getPage", () => {
     ]);
     await databaseService.closeDatabase();
 
-    const data = createData({ logDir: "/cache/logs" });
+    const data = createData("/cache/logs");
     const page = await data.getPage(undefined, undefined, {
       cursor: null,
       direction: "forward",
@@ -781,13 +769,8 @@ describe("readLogsOverview", () => {
 describe("LogsListingData.getMatches", () => {
   let databaseService: DatabaseService;
 
-  const createData = (): LogsListingData<Log> =>
-    createLogsListingData<Log>({
-      logDir: "/test/logs",
-      toRow: (log: LogListingRow) => log,
-      getValue,
-      getComparator: () => undefined,
-    });
+  const createData = (): LogsListingData<LogListingRow> =>
+    createLogsListingData({ logDir: "/test/logs", schema });
 
   beforeEach(async () => {
     databaseService = createDatabaseService();
@@ -866,12 +849,12 @@ describe("LogsListingData.getMatches", () => {
       {
         id: "/test/logs/c.json",
         offset: 0,
-        orderValues: { name: "/test/logs/c.json" },
+        orderValues: { name: "c.json" },
       },
       {
         id: "/test/logs/a.json",
         offset: 2,
-        orderValues: { name: "/test/logs/a.json" },
+        orderValues: { name: "a.json" },
       },
     ]);
   });
@@ -905,12 +888,12 @@ describe("LogsListingData.getMatches", () => {
       {
         id: "/test/logs/b.json",
         offset: 0,
-        orderValues: { name: "/test/logs/b.json" },
+        orderValues: { name: "b.json" },
       },
       {
         id: "/test/logs/c.json",
         offset: 1,
-        orderValues: { name: "/test/logs/c.json" },
+        orderValues: { name: "c.json" },
       },
     ]);
   });

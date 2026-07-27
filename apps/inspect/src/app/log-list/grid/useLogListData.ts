@@ -4,18 +4,19 @@ import { useMemo } from "react";
 import type { Condition, OrderByModel } from "@tsmono/inspect-common/query";
 import type { ColumnFilter } from "@tsmono/inspect-components/columnFilter";
 
-import { compareByOrderBy } from "../../../log_data";
+import {
+  applyListingQuery,
+  compareByOrderBy,
+  mergeSortedRows,
+} from "../../../log_data";
 import type {
   FilterTypeAccessor,
+  LogListingRow,
   ValueAccessor,
   ValueComparator,
 } from "../../../log_data";
 import { useLogsListing } from "../../../state/hooks";
 import { useKeyedMemo } from "../../shared/useKeyedMemo";
-import {
-  applyListingQuery,
-  mergeSortedRows,
-} from "../listing/applyListingQuery";
 import { combineFilters } from "../listing/combineFilters";
 import {
   sortingStateToOrderBy,
@@ -66,9 +67,14 @@ interface UseLogListDataParams {
   getValue: ValueAccessor<LogListRow>;
   getComparator: (columnId: string) => ValueComparator | undefined;
   getFilterType?: FilterTypeAccessor;
-  /** Cache identity of the accessors (see `useLogListColumns`). */
+  /** Cache identity of the column schema (see `useLogListColumns`). */
   accessorsKey: string;
-  listing: LogsListingDescriptor<LogListRow>;
+  /** Shape a queried record into its display row (`undefined`: the view
+   *  can't shape it — a shaping guard, the conditions exclude such records
+   *  anyway). Pages come back as records; shaping runs here, above the
+   *  data interface, per loaded page. */
+  shapeRow: (log: LogListingRow) => LogListRow | undefined;
+  listing: LogsListingDescriptor<LogListingRow>;
 }
 
 export interface LogListData {
@@ -121,6 +127,7 @@ export const useLogListData = ({
   getComparator,
   getFilterType,
   accessorsKey,
+  shapeRow,
   listing,
 }: UseLogListDataParams): LogListData => {
   const { gridStateByScope } = useLogsListing();
@@ -180,12 +187,25 @@ export const useLogListData = ({
     fetchNextPage,
     ensureOffsetLoaded,
     autoFetchPaused,
-  } = useDatabaseLogsListingQuery<LogListRow>({
+  } = useDatabaseLogsListingQuery<LogListingRow>({
     filter,
     orderBy,
     accessorsKey,
     listing,
   });
+
+  // Pages arrive as stored records; shape them into display rows here,
+  // above the data interface — per loaded page, per shaping inputs.
+  const fileRows = useMemo(() => {
+    const records = result?.items;
+    if (records === undefined || records.length === 0) return kNoRows;
+    const rows: LogListRow[] = [];
+    for (const record of records) {
+      const row = shapeRow(record);
+      if (row !== undefined) rows.push(row);
+    }
+    return rows;
+  }, [result, shapeRow]);
 
   // The pending anti-join input (overview.taskIds) and the file rows are two
   // independent async reads of the same store, so a settle-order skew can
@@ -194,12 +214,8 @@ export const useLogListData = ({
   // not pending, whatever the overview's snapshot said.
   const visiblePendingRows = useMemo(
     () =>
-      dropSettledPendingRows(
-        pendingRows,
-        result?.items ?? kNoRows,
-        result?.universe_task_ids
-      ),
-    [pendingRows, result]
+      dropSettledPendingRows(pendingRows, fileRows, result?.universe_task_ids),
+    [pendingRows, fileRows, result]
   );
 
   // Pending tasks have no database record: run the same query over them in
@@ -228,14 +244,13 @@ export const useLogListData = ({
   );
 
   const files = useMemo(() => {
-    const base = result?.items ?? kNoRows;
-    if (!overlay) return base;
+    if (!overlay) return fileRows;
     const compare =
       orderBy.length > 0
         ? compareByOrderBy(orderBy, getValue, getComparator)
         : undefined;
-    return mergeSortedRows(base, overlay.items, compare);
-  }, [result, overlay, orderBy, getValue, getComparator]);
+    return mergeSortedRows(fileRows, overlay.items, compare);
+  }, [fileRows, overlay, orderBy, getValue, getComparator]);
 
   const rows = useMemo(
     () => (folders.length > 0 ? [...folders, ...files] : files),
