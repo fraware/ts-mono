@@ -716,9 +716,7 @@ describe("LogsListingData.getPage", () => {
       direction: "forward",
       limit: 2,
     });
-    expect(second.items.map((row) => row.name)).toEqual([
-      "/cache/logs/c.json",
-    ]);
+    expect(second.items.map((row) => row.name)).toEqual(["/cache/logs/c.json"]);
     expect(second.next_cursor).toBeNull();
 
     // Bidirectional cursors, like the database path.
