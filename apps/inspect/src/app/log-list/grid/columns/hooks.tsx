@@ -9,8 +9,6 @@ import { scopePrefix } from "../../../../client/database";
 import { kModelNone } from "../../../../constants";
 import {
   createLogColumnSchema,
-  dateCompare,
-  numberCompare,
   useLogListing,
   useScoreSchema,
   type LogColumnSchema,
@@ -254,7 +252,6 @@ export const useLogListColumns = (
         size: 80,
         minSize: 60,
         maxSize: 120,
-        meta: { sortComparator: numberCompare },
         accessorFn: (row) => row.score,
         textValue: (row) =>
           row.score === undefined ? null : formatPrettyDecimal(row.score),
@@ -326,7 +323,6 @@ export const useLogListColumns = (
         size: 130,
         minSize: 80,
         maxSize: 140,
-        meta: { sortComparator: dateCompare },
         // Raw value for sort/filter; the cell formats from row.original.
         accessorFn: (row) => completedAtValue(row),
         cell: ({ row }) => {
@@ -390,7 +386,6 @@ export const useLogListColumns = (
         size: 90,
         minSize: 60,
         maxSize: 120,
-        meta: { sortComparator: numberCompare },
         accessorFn: (row) => row.totalSamples,
         cell: ({ getValue }) => {
           const value = getValue<number | undefined>();
@@ -406,7 +401,6 @@ export const useLogListColumns = (
         size: 130,
         minSize: 80,
         maxSize: 160,
-        meta: { sortComparator: numberCompare },
         accessorFn: (row) => row.completedSamples,
         cell: ({ getValue }) => {
           const value = getValue<number | undefined>();
@@ -435,7 +429,6 @@ export const useLogListColumns = (
         size: 100,
         minSize: 60,
         maxSize: 140,
-        meta: { sortComparator: numberCompare },
         accessorFn: (row) => row.totalTokens,
         cell: ({ getValue }) => {
           const value = getValue<number | undefined>();
@@ -451,7 +444,6 @@ export const useLogListColumns = (
         size: 120,
         minSize: 70,
         maxSize: 160,
-        meta: { sortComparator: numberCompare },
         accessorFn: (row) => row.duration,
         titleValue: (row) =>
           row.duration === undefined ? undefined : formatTime(row.duration),
@@ -515,7 +507,6 @@ export const useLogListColumns = (
         size: 110,
         minSize: 80,
         maxSize: 140,
-        meta: { sortComparator: numberCompare },
         accessorFn: (row) => row.percentCompleted,
         textValue: (row) =>
           row.percentCompleted === undefined
@@ -535,7 +526,6 @@ export const useLogListColumns = (
         size: 110,
         minSize: 60,
         maxSize: 140,
-        meta: { sortComparator: numberCompare },
         accessorFn: (row) => row.sampleErrors,
         cell: ({ getValue }) => {
           const value = getValue<number | undefined>();
@@ -577,16 +567,12 @@ export const useLogListColumns = (
     // order so the column sequence is stable regardless of log iteration.
     const perScorerColumns: LogListColumn[] = Object.entries(scorerMap)
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, { scorerName, metricName, valueType }]) => {
+      .map(([key, { scorerName, metricName }]) => {
         return {
           id: `score_${key}`,
           header: scorerMetricHeader(scorerName, metricName),
           size: 100,
           minSize: 100,
-          meta:
-            valueType === "number"
-              ? { sortComparator: numberCompare }
-              : undefined,
           accessorFn: (row) => row[`score_${key}`],
           textValue: (row) => {
             const value = row[`score_${key}`];
@@ -617,25 +603,17 @@ export const useLogListColumns = (
     // in alphabetical scorer order and returns the first non-empty value.
     // The cell additionally renders a "+N" badge with a tooltip when more
     // than one scorer on the same row produced the metric.
-    const metricGroups = new Map<
-      string,
-      { scorerName: string; valueType: string }[]
-    >();
-    for (const { scorerName, metricName, valueType } of Object.values(
-      scorerMap
-    )) {
+    const metricGroups = new Map<string, string[]>();
+    for (const { scorerName, metricName } of Object.values(scorerMap)) {
       const list = metricGroups.get(metricName) ?? [];
-      list.push({ scorerName, valueType });
+      list.push(scorerName);
       metricGroups.set(metricName, list);
     }
 
     const byMetricColumns: LogListColumn[] = [...metricGroups.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([metricName, entries]) => {
-        const scorerOrder = entries
-          .map((e) => e.scorerName)
-          .sort((a, b) => a.localeCompare(b));
-        const allNumeric = entries.every((e) => e.valueType === "number");
+      .map(([metricName, scorers]) => {
+        const scorerOrder = [...scorers].sort((a, b) => a.localeCompare(b));
 
         const readContributors = (
           row: LogListRow | undefined
@@ -662,7 +640,6 @@ export const useLogListColumns = (
           header: metricName,
           size: 100,
           minSize: 100,
-          meta: allNumeric ? { sortComparator: numberCompare } : undefined,
           accessorFn: (row) => readContributors(row)[0]?.value,
           textValue: (row) => {
             const first = readContributors(row)[0];
