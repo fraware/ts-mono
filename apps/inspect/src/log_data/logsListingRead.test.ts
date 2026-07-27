@@ -200,9 +200,10 @@ describe("listing reads", () => {
     expect(page.items.map((row) => row.name)).toEqual([
       "/test/logs/sub/b.json",
     ]);
-    // The scan prefix derives from the condition rather than arriving as a
-    // second, manually-coordinated input.
-    expect(readLogsSpy).toHaveBeenCalledWith({ prefix: "/test/logs/sub" });
+    // The scan derives from the condition rather than arriving as a second,
+    // manually-coordinated input — and pins the stored parent_dir index
+    // (exactly the direct children) rather than ranging over the subtree.
+    expect(readLogsSpy).toHaveBeenCalledWith({ parentDir: "/test/logs/sub" });
   });
 
   test("serves from the react-query cache when the database is not open", async () => {

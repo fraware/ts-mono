@@ -26,6 +26,12 @@ export type SampleSummariesScope = { file: string } | { prefix: string };
  *  listing-level operation names its scope. */
 export type LogScope = { prefix: string };
 
+/** What a listing read scans: a whole subtree (boundary-safe `prefix`
+ *  range) or exactly one directory's direct children (`parentDir` index
+ *  equality — the folder view's membership, so the scan skips subfolder
+ *  contents entirely). */
+export type LogQueryScope = LogScope | { parentDir: string };
+
 const newRow = (handle: LogHandle): Log => ({
   ...handle,
   depth: "listed",
@@ -117,7 +123,7 @@ export class DatabaseService {
     });
   }
 
-  async readLogs(scope: LogScope): Promise<Log[] | null> {
+  async readLogs(scope: LogQueryScope): Promise<Log[] | null> {
     try {
       if (!this.opened()) {
         log.debug("Database not open");
@@ -125,10 +131,15 @@ export class DatabaseService {
       }
 
       const db = this.getDb();
-      const records = await db.logs
-        .where("file_path")
-        .startsWith(scopePrefix(scope.prefix))
-        .toArray();
+      // Trailing slash stripped to match the stored `dirname` form (the
+      // same normalization `isInDirectory` applies to its directory).
+      const records = await (
+        "parentDir" in scope
+          ? db.logs
+              .where("parent_dir")
+              .equals(scope.parentDir.replace(/\/$/, ""))
+          : db.logs.where("file_path").startsWith(scopePrefix(scope.prefix))
+      ).toArray();
 
       // Sort by mtime (descending) if present, otherwise maintain insertion
       // order. Note: != null (not !==) catches both null and undefined.

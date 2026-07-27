@@ -346,7 +346,12 @@ Checked against the actual condition language
   wildcard-escaping paths containing `%` or `_` — a silent-corruption
   hazard. Cleaner: a `parent_dir` column (`parent_dir = 'dir'`), derivable
   from the file path during the scan now, and a real stored (and indexed)
-  column later.
+  column later. *Landed:* `parent_dir` is now stored and indexed at write
+  time (derived from the immutable `file_path`, so it can't go stale;
+  recreate-on-mismatch covers migration), and a filter that pins it scans
+  the index — exactly the direct children — instead of ranging over the
+  subtree. This is the first membership term to become an indexed WHERE
+  clause, as promised.
 - **Retried-hiding.** `retried = false`, with the derived column made
   *total*: the derivation emits `false` for group winners and task-id-less
   logs alike, `true` only for actual retried runs. Today
@@ -354,11 +359,17 @@ Checked against the actual condition language
   condition evaluator implements SQL three-valued logic (NULL fails
   negative operators too) — so the natural `retried != true` would
   silently drop every task-id-less log. A total boolean sidesteps null
-  semantics entirely, and is the right shape for persisting at write time
-  (already on the plan doc's roadmap). "Retried" is still computed by
-  *grouping* rows during the scan, not stored per record; the
-  implementation derives it before filtering, so it is queryable
-  immediately.
+  semantics entirely. "Retried" is still computed by *grouping* rows
+  during the scan, not stored per record; the implementation derives it
+  before filtering, so it is queryable immediately. *Decided against
+  persisting it at write time* (unlike `parent_dir`): the mark is a
+  cross-row derivation over live statuses — a preview write flipping one
+  log's status can change its group's winner, so a stored column would
+  need sibling-group recomputation on every keyed write, a new invariant
+  to maintain — and as a low-selectivity boolean it would buy almost
+  nothing as an index while the scan-time derivation is already cheap.
+  Revisit only if an index-backed snapshot build ever needs `retried`
+  without scanning.
 - **Valid log identity.** A parse check, not expressible in the operator
   set — and it shouldn't be. Either replication already only writes rows
   that parse (verify this), or a validity flag gets stored at write time
@@ -531,7 +542,10 @@ Each phase lands independently green:
    instance-level promise cache (a small keyed map, so the listing and
    overview reads don't thrash each other) with epoch invalidation. The
    hooks become thin wrappers; `databaseLogsListingSnapshotKey` and
-   `fetchLogsListingSnapshot` are deleted. Behavior-neutral.
+   `fetchLogsListingSnapshot` are deleted. Behavior-neutral. (As landed,
+   this phase also moved `evaluator.ts`/`planner.ts` into the data layer —
+   originally slated for phase 3 — because the factory compiles plans
+   internally and must not import upward from `app/`.)
 2. **Membership becomes conditions.** Derive `parent_dir` and total
    `retried` as record-level queryable columns during the scan; the view
    composes `scope AND userFilter`; the implementation derives its scan
@@ -539,9 +553,11 @@ Each phase lands independently green:
    dies); `toRow` shrinks to pure shaping. The `universe` string, the
    duplicated prefix, and `isCandidate` are deleted.
 3. **Column semantics and the resolver.** Extract the column-semantics
-   module from `useLogListColumns`; move the evaluation machinery
-   (`evaluator.ts`, `planner.ts`, `applyListingQuery`) into the data
-   layer; `getPage` switches to records-out with shaping lifted into the
-   view. As landed, the schema came out fully record-level, so the
+   module from `useLogListColumns`; move `applyListingQuery` into the
+   data layer; `getPage` switches to records-out with shaping lifted into
+   the view. As landed, the schema came out fully record-level, so the
    planned shaped-row fallback was never needed — see the outcome note in
-   "Two kinds of column names".
+   "Two kinds of column names". A parity test
+   (`schemaParity.test.tsx`) pins the schema's record values to the grid
+   accessors' shaped-row values for every column, turning the projection
+   assumption into an invariant.

@@ -37,9 +37,23 @@ const logsListingSource = (logDir: string): "database" | "cache" =>
     ? "database"
     : "cache";
 
-const scanRows = async (logDir: string, prefix: string): Promise<Log[]> => {
+/** Where a listing read scans (derived from the filter — see
+ *  {@link scanScopeFromFilter}): the db path uses `parentDir` (a
+ *  `parent_dir` index equality — exactly the direct children) when set,
+ *  else a boundary-safe `prefix` range; the cache path always
+ *  prefix-filters (a superset — the plan's conditions finish the job). */
+interface ScanScope {
+  prefix: string;
+  parentDir?: string;
+}
+
+const scanRows = async (logDir: string, scope: ScanScope): Promise<Log[]> => {
   if (logsListingSource(logDir) === "database") {
-    const logs = await getDatabaseService().readLogs({ prefix });
+    const logs = await getDatabaseService().readLogs(
+      scope.parentDir !== undefined
+        ? { parentDir: scope.parentDir }
+        : { prefix: scope.prefix }
+    );
     if (logs !== null) return logs;
     // `readLogs` swallows store errors to null. Don't degrade to the cache
     // mirror: it can be GC'd empty, and the snapshot cache would then serve
@@ -54,18 +68,21 @@ const scanRows = async (logDir: string, prefix: string): Promise<Log[]> => {
   // would drop every row. Serve the whole listing; the filter conditions
   // own membership.
   if (isCacheOnlyListingScope(logDir)) return getLogRows(logDir);
-  const scope = scopePrefix(prefix);
-  return getLogRows(logDir).filter((row) => row.name.startsWith(scope));
+  const prefix = scopePrefix(scope.prefix);
+  return getLogRows(logDir).filter((row) => row.name.startsWith(prefix));
 };
 
 /**
- * Narrow a scan to a directory subtree when the filter pins `parent_dir`:
- * only AND branches are walked (an equality under OR/NOT can't narrow the
- * scan). The subtree scan is a superset of the equality's direct children;
- * the condition itself does the exact filtering — one representation, with
- * the prefix derived rather than passed alongside (the two can't drift).
+ * Narrow a scan when the filter pins `parent_dir`: only AND branches are
+ * walked (an equality under OR/NOT can't narrow the scan). The pinned
+ * directory serves as an index equality on the db path — exactly the
+ * direct children the condition admits — and as a subtree prefix on the
+ * cache path (a superset; the condition itself finishes the filtering).
+ * One representation, with the scope derived rather than passed alongside
+ * (the two can't drift). Retried grouping keys on a row's exact parent
+ * directory, so both scan shapes keep every group whole.
  */
-const scanPrefixFromFilter = (logDir: string, filter?: Condition): string => {
+const scanScopeFromFilter = (logDir: string, filter?: Condition): ScanScope => {
   const walk = (condition: Condition): string | undefined => {
     if (condition.compound) {
       if (condition.operator !== "AND") return undefined;
@@ -80,7 +97,10 @@ const scanPrefixFromFilter = (logDir: string, filter?: Condition): string => {
       ? condition.right
       : undefined;
   };
-  return (filter && walk(filter)) ?? logDir;
+  const parentDir = filter && walk(filter);
+  return parentDir === undefined || parentDir === null
+    ? { prefix: logDir }
+    : { prefix: parentDir, parentDir };
 };
 
 /**
@@ -95,21 +115,19 @@ const scanPrefixFromFilter = (logDir: string, filter?: Condition): string => {
  * observers as further writes land. Callers surface sync progress
  * separately rather than hiding rows behind it.
  *
- * `prefix` narrows the scan (derived from the filter's `parent_dir` term —
- * see {@link scanPrefixFromFilter}). Retried grouping keys on a row's
- * exact parent directory, so a boundary-safe prefix scan never splits a
- * group and the marking matches a whole-dir scan's.
+ * `scope` narrows the scan (derived from the filter — see
+ * {@link scanScopeFromFilter}).
  *
  * `sorted: false` skips the plan's ordering, for callers that impose their
  * own (the match projection orders by snapshot key position).
  */
 const scanListingRecords = async (
   logDir: string,
-  prefix: string,
+  scope: ScanScope,
   plan: DatabaseListingPlan<LogListingRow>,
   options?: { sorted: boolean }
 ): Promise<LogListingRow[]> => {
-  const scanned = await scanRows(logDir, prefix);
+  const scanned = await scanRows(logDir, scope);
   const records = computeLogsWithRetried(scanned).filter(plan.matches);
   // Stable sort over the scan's listing order (mtime-descending), so ties —
   // and the unsorted listing — keep that order without a position tiebreak.
@@ -121,10 +139,10 @@ const scanListingRecords = async (
 
 const readLogsListing = async (
   logDir: string,
-  prefix: string,
+  scope: ScanScope,
   plan: DatabaseListingPlan<LogListingRow>
 ): Promise<DatabaseListingResult<LogListingRow>> => {
-  const records = await scanListingRecords(logDir, prefix, plan);
+  const records = await scanListingRecords(logDir, scope, plan);
   const total_count = records.length;
   return { ...pageRows(records, plan.pagination), total_count };
 };
@@ -161,11 +179,11 @@ export interface LogsListingSnapshot {
  *  the snapshot shape). */
 export const readLogsListingSnapshot = async (
   logDir: string,
-  prefix: string,
+  scope: ScanScope,
   plan: DatabaseListingPlan<LogListingRow>,
   firstPageSize: number
 ): Promise<LogsListingSnapshot> => {
-  const records = await scanListingRecords(logDir, prefix, plan);
+  const records = await scanListingRecords(logDir, scope, plan);
   const keys: string[] = [];
   const retried: Record<string, boolean> = {};
   const taskIds = new Set<string>();
@@ -316,7 +334,7 @@ export const readLogsOverview = async (
   logDir: string,
   options: LogsOverviewOptions
 ): Promise<LogsOverview> => {
-  const scanned = await scanRows(logDir, logDir);
+  const scanned = await scanRows(logDir, { prefix: logDir });
   const rows = computeLogsWithRetried(scanned);
 
   // The listing's directory membership (`parent_dir = folderDir`): file
@@ -514,7 +532,7 @@ export const createLogsListingData = (
       epoch,
       promise: readLogsListingSnapshot(
         logDir,
-        scanPrefixFromFilter(logDir, filter),
+        scanScopeFromFilter(logDir, filter),
         plan,
         firstPageSize
       ),
@@ -546,11 +564,7 @@ export const createLogsListingData = (
       // per read stays the simpler, equally-cheap form. No
       // universe_task_ids: the single page IS the whole universe, so the
       // anti-join's loaded-window fallback already covers it.
-      return readLogsListing(
-        logDir,
-        scanPrefixFromFilter(logDir, filter),
-        plan
-      );
+      return readLogsListing(logDir, scanScopeFromFilter(logDir, filter), plan);
     }
     const snapshot = await fetchSnapshot(
       filter,
@@ -598,7 +612,7 @@ export const createLogsListingData = (
     find: LogsListingFindQuery<LogListingRow>
   ): Promise<LogsListingMatch[]> => {
     const plan = compilePlan(filter, orderBy);
-    const prefix = scanPrefixFromFilter(logDir, filter);
+    const scope = scanScopeFromFilter(logDir, filter);
     const term = find.term.toLowerCase();
     const toMatch = (log: LogListingRow, offset: number): LogsListingMatch => {
       const orderValues = orderBy?.length
@@ -611,7 +625,7 @@ export const createLogsListingData = (
     };
 
     if (logsListingSource(logDir) === "cache") {
-      const records = await scanListingRecords(logDir, prefix, plan);
+      const records = await scanListingRecords(logDir, scope, plan);
       const matches: LogsListingMatch[] = [];
       for (let offset = 0; offset < records.length; offset++) {
         const log = records[offset]!;
@@ -630,7 +644,7 @@ export const createLogsListingData = (
     // the plan's full-list sort would be paid per keystroke and discarded.
     const [snapshot, records] = await Promise.all([
       fetchSnapshot(filter, orderBy, plan, find.pageSize),
-      scanListingRecords(logDir, prefix, plan, { sorted: false }),
+      scanListingRecords(logDir, scope, plan, { sorted: false }),
     ]);
     const offsetByKey = new Map(
       snapshot.keys.map((key, offset) => [key, offset] as const)
