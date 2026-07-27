@@ -24,6 +24,7 @@ import { joinSearchText } from "./listing/searchText";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
 import { getLogRows, isCacheOnlyListingScope } from "./logsContent";
 import { logsListingEpoch } from "./logsListingEpoch";
+import { computeScorerMap, type ScorerMap } from "./scoreSchema";
 
 /**
  * Where listing queries for `logDir` read their rows — an explicit,
@@ -410,6 +411,49 @@ export const readLogsOverview = async (
       options.folderDir === undefined
         ? []
         : deriveFolders(rows, options.folderDir),
+  };
+};
+
+/** Facts the column *set* is built from — whole-universe by nature: a score
+ *  column must exist even when the only log carrying its scorer sits on an
+ *  unloaded page. See {@link readLogsColumnFacts}. */
+export interface LogsColumnFacts {
+  /** Distinct (scorer, metric) pairs across the scope — the score columns
+   *  the listing offers (see `createLogColumnSchema`). */
+  scorerMap: ScorerMap;
+  /** Whether any in-scope log's samples ended with a limit — promotes the
+   *  sampleLimits column to default-visible. */
+  hasSampleLimits: boolean;
+}
+
+/**
+ * One scan producing the facts the column schema is built from. A sibling
+ * of {@link readLogsOverview}, but deliberately NOT a `LogsListingData`
+ * method: instances are constructed *with* the schema these facts produce
+ * (`createLogsListingData({ schema })`), so this read must sit upstream of
+ * the instance — it consumes raw records only, never schema accessors.
+ *
+ * Membership is the scope *subtree* (`scopeDir` prefix), not the listing's
+ * direct-children condition: a folder offers score columns from logs in
+ * nested subfolders too. Retried runs contribute regardless of retried-
+ * hiding — hiding a run doesn't retract its scorers.
+ */
+export const readLogsColumnFacts = async (
+  logDir: string,
+  scopeDir?: string
+): Promise<LogsColumnFacts> => {
+  // The subtree scan: an index range on the db path. The cache path can
+  // serve a superset (an out-of-namespace listing arrives whole), so the
+  // prefix re-applies per row below and in computeScorerMap.
+  const rows = await scanRows(logDir, { prefix: scopeDir ?? logDir });
+  const prefix = scopeDir === undefined ? undefined : scopePrefix(scopeDir);
+  return {
+    scorerMap: computeScorerMap(rows, scopeDir),
+    hasSampleLimits: rows.some(
+      (row) =>
+        (prefix === undefined || row.name.startsWith(prefix)) &&
+        (row.header?.sampleLimits.length ?? 0) > 0
+    ),
   };
 };
 

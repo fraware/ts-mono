@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { Column } from "@tsmono/inspect-common/query";
 import type { Condition, OrderByModel } from "@tsmono/inspect-common/query";
 
-import type { Log, LogPreview } from "../client/api/types";
+import type { Log, LogHeader, LogPreview } from "../client/api/types";
 import { DB_NAME } from "../client/database/schema";
 import {
   createDatabaseService,
@@ -30,10 +30,12 @@ import { setRows, writeListing } from "./logsContent";
 import { bumpLogsListingEpoch } from "./logsListingEpoch";
 import {
   createLogsListingData,
+  readLogsColumnFacts,
   readLogsOverview,
   type LogsListingData,
   type LogsListingPageResult,
 } from "./logsListingRead";
+import { computeScorerMap } from "./scoreSchema";
 
 const holder = vi.hoisted(() => {
   const state: { service: DatabaseService | null } = { service: null };
@@ -834,6 +836,137 @@ describe("readLogsOverview", () => {
     expect(shown.fileCount).toBe(2);
     expect(shown.retriedCount).toBe(1);
     expect(shown.soleFileName).toBeUndefined();
+  });
+});
+
+describe("readLogsColumnFacts", () => {
+  let databaseService: DatabaseService;
+
+  beforeEach(async () => {
+    databaseService = createDatabaseService();
+    holder.service = databaseService;
+    await databaseService.openDatabase();
+  });
+
+  afterEach(async () => {
+    await databaseService.closeDatabase();
+    await Dexie.delete(DB_NAME);
+  });
+
+  const header = (
+    scores: Array<{ name: string; metrics: Record<string, number | string> }>,
+    sampleLimits: string[] = []
+  ): LogHeader =>
+    ({
+      results: {
+        scores: scores.map((s) => ({
+          name: s.name,
+          metrics: Object.fromEntries(
+            Object.entries(s.metrics).map(([m, value]) => [m, { value }])
+          ),
+        })),
+      },
+      sampleLimits,
+    }) as unknown as LogHeader;
+
+  const writeDetailed = (headers: Record<string, LogHeader>) =>
+    databaseService.writeLogDetails(
+      Object.fromEntries(
+        Object.entries(headers).map(([file, h]) => [
+          file,
+          {
+            header: h,
+            patch: { depth: "detailed" as const, header: h },
+            summaries: [],
+          },
+        ])
+      )
+    );
+
+  test("scans the scope for scorer columns, agreeing with the in-memory computation", async () => {
+    const headers = {
+      "/test/logs/a.eval": header([
+        { name: "match", metrics: { accuracy: 0.5 } },
+      ]),
+      "/test/logs/sub/b.eval": header([
+        { name: "model_graded", metrics: { accuracy: 0.7, grade: "I" } },
+      ]),
+    };
+    await writeDetailed(headers);
+    // A previewed row without a header contributes nothing.
+    await databaseService.writeLogPreviews({
+      "/test/logs/c.json": preview({ task_id: "t-c" }),
+    });
+
+    const facts = await readLogsColumnFacts("/test/logs");
+
+    expect(facts.scorerMap).toEqual(
+      computeScorerMap(
+        Object.entries(headers).map(
+          ([name, h]) => ({ name, header: h }) as unknown as Log
+        )
+      )
+    );
+    expect(facts.scorerMap["model_graded/grade"]?.valueType).toBe("string");
+    expect(facts.hasSampleLimits).toBe(false);
+  });
+
+  test("scopeDir membership is the subtree, boundary-safe", async () => {
+    await writeDetailed({
+      "/test/logs/sub/nested/a.eval": header([
+        { name: "nested", metrics: { accuracy: 1 } },
+      ]),
+      "/test/logs/sub2/b.eval": header([
+        { name: "sibling", metrics: { f1: 1 } },
+      ]),
+    });
+
+    const facts = await readLogsColumnFacts("/test/logs", "/test/logs/sub");
+
+    // Nested subfolders contribute (subtree, not the listing's
+    // direct-children membership); the prefix-sharing sibling doesn't.
+    expect(Object.keys(facts.scorerMap)).toEqual(["nested/accuracy"]);
+  });
+
+  test("retried runs contribute scorers even though the listing hides them", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/2024-01-01_task.json": preview({ task_id: "shared" }),
+      "/test/logs/2024-01-02_task.json": preview({ task_id: "shared" }),
+    });
+    await writeDetailed({
+      "/test/logs/2024-01-01_task.json": header([
+        { name: "old_scorer", metrics: { accuracy: 1 } },
+      ]),
+      "/test/logs/2024-01-02_task.json": header([
+        { name: "new_scorer", metrics: { accuracy: 1 } },
+      ]),
+    });
+
+    const facts = await readLogsColumnFacts("/test/logs");
+
+    expect(Object.keys(facts.scorerMap).sort()).toEqual([
+      "new_scorer/accuracy",
+      "old_scorer/accuracy",
+    ]);
+  });
+
+  test("hasSampleLimits reflects only in-scope logs", async () => {
+    await writeDetailed({
+      "/test/logs/sub/a.eval": header([], ["time"]),
+      "/test/logs/sub2/b.eval": header([]),
+    });
+
+    expect((await readLogsColumnFacts("/test/logs")).hasSampleLimits).toBe(
+      true
+    );
+    expect(
+      (await readLogsColumnFacts("/test/logs", "/test/logs/sub"))
+        .hasSampleLimits
+    ).toBe(true);
+    expect(
+      (await readLogsColumnFacts("/test/logs", "/test/logs/sub2"))
+        .hasSampleLimits
+    ).toBe(false);
   });
 });
 
