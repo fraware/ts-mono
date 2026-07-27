@@ -33,7 +33,7 @@ export interface LogsListingResult<TRow> {
 export type ValueComparator = (
   a: unknown,
   b: unknown,
-  isDescending: boolean
+  isDescending?: boolean
 ) => number;
 
 /** Reads a row's value for a column id (built from the column defs). */

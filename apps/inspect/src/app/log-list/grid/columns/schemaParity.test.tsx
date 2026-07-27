@@ -12,8 +12,11 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 
-import type { LogListingRow, ScorerMap } from "../../../../log_data";
-import { primitiveText } from "../../../shared/data-grid/findMatches";
+import {
+  primitiveText,
+  type LogListingRow,
+  type ScorerMap,
+} from "../../../../log_data";
 import { fileLogItem, type FileLogItemView } from "../../fileLogItem";
 import { buildLogListRow } from "../logListRow";
 

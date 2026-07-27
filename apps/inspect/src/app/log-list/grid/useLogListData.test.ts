@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
 
+import type { LogListingRow } from "../../../log_data";
+
 import type { LogListRow } from "./columns/types";
 import { dropSettledPendingRows } from "./useLogListData";
 
@@ -13,7 +15,7 @@ const file = (name: string, taskId?: string): LogListRow => ({
   id: name,
   name,
   type: "file",
-  log: { name, task_id: taskId ?? null },
+  log: { name, task_id: taskId ?? null } as LogListingRow,
 });
 
 describe("dropSettledPendingRows", () => {

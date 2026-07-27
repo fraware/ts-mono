@@ -253,8 +253,11 @@ export const useLogListColumns = (
         minSize: 60,
         maxSize: 120,
         accessorFn: (row) => row.score,
+        // File rows' search text comes from the schema — one formatting
+        // rule for the shaped-row search index and record-level Find.
+        // Overlay rows have no record (and no value in these columns).
         textValue: (row) =>
-          row.score === undefined ? null : formatPrettyDecimal(row.score),
+          row.log ? schema.getSearchText(row.log, "score") : null,
         cell: ({ row }) => {
           const item = row.original;
           if (item.score === undefined) {
@@ -448,7 +451,7 @@ export const useLogListColumns = (
         titleValue: (row) =>
           row.duration === undefined ? undefined : formatTime(row.duration),
         textValue: (row) =>
-          row.duration === undefined ? null : formatTime(row.duration),
+          row.log ? schema.getSearchText(row.log, "duration") : null,
         cell: ({ getValue }) => {
           const value = getValue<number | undefined>();
           if (value === undefined || value === null) {
@@ -509,9 +512,7 @@ export const useLogListColumns = (
         maxSize: 140,
         accessorFn: (row) => row.percentCompleted,
         textValue: (row) =>
-          row.percentCompleted === undefined
-            ? null
-            : `${formatPrettyDecimal(row.percentCompleted)}%`,
+          row.log ? schema.getSearchText(row.log, "percentCompleted") : null,
         cell: ({ getValue }) => {
           const value = getValue<number | undefined>();
           if (value === undefined || value === null) {
@@ -574,12 +575,8 @@ export const useLogListColumns = (
           size: 100,
           minSize: 100,
           accessorFn: (row) => row[`score_${key}`],
-          textValue: (row) => {
-            const value = row[`score_${key}`];
-            if (typeof value === "number") return formatPrettyDecimal(value);
-            if (typeof value === "boolean") return String(value);
-            return typeof value === "string" && value !== "" ? value : null;
-          },
+          textValue: (row) =>
+            row.log ? schema.getSearchText(row.log, `score_${key}`) : null,
           cell: ({ getValue }) => {
             const value = getValue<
               string | number | boolean | null | undefined
@@ -641,13 +638,10 @@ export const useLogListColumns = (
           size: 100,
           minSize: 100,
           accessorFn: (row) => readContributors(row)[0]?.value,
-          textValue: (row) => {
-            const first = readContributors(row)[0];
-            if (!first) return null;
-            return typeof first.value === "number"
-              ? formatPrettyDecimal(first.value)
-              : String(first.value);
-          },
+          textValue: (row) =>
+            row.log
+              ? schema.getSearchText(row.log, byMetricField(metricName))
+              : null,
           cell: ({ row }) => {
             const [first, ...extras] = readContributors(row.original);
             if (!first) return <EmptyCell />;

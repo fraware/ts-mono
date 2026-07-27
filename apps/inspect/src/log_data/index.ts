@@ -119,10 +119,12 @@ export {
   completedAtFallback,
   createLogColumnSchema,
   dateCompare,
+  isMissingNumber,
   numberCompare,
   parentDirCondition,
   type LogColumnSchema,
 } from "./listing/logColumnSchema";
+export { joinSearchText, primitiveText } from "./listing/searchText";
 export { createListingPlan } from "./listing/planner";
 export type {
   FilterTypeAccessor,

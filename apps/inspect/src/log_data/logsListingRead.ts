@@ -17,6 +17,7 @@ import { directoryRelativeUrl, rootName } from "../utils/uri";
 import { getDatabaseService } from "./databaseServiceInstance";
 import type { LogColumnSchema } from "./listing/logColumnSchema";
 import { createListingPlan } from "./listing/planner";
+import { joinSearchText } from "./listing/searchText";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
 import { getLogRows, isCacheOnlyListingScope } from "./logsContent";
 import { logsListingEpoch } from "./logsListingEpoch";
@@ -640,14 +641,12 @@ export const createLogsListingData = (
     const plan = compilePlan(filter, orderBy);
     const scope = scanScopeFromFilter(logDir, filter);
     const term = find.term.toLowerCase();
-    // Newline separator, like the grid's `rowSearchText`: it never matches
-    // a typed term, so a term can't match across adjacent columns' text.
     const rowText = (log: LogListingRow): string =>
-      find.searchColumns
-        .map((columnId) => schema.getSearchText(log, columnId))
-        .filter((text): text is string => text !== null && text !== "")
-        .join("\n")
-        .toLowerCase();
+      joinSearchText(
+        find.searchColumns.map((columnId) =>
+          schema.getSearchText(log, columnId)
+        )
+      );
     const toMatch = (log: LogListingRow, offset: number): LogsListingMatch => {
       const orderValues = orderBy?.length
         ? Object.fromEntries(

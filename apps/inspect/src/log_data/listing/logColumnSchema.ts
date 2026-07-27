@@ -8,6 +8,7 @@ import { formatTime } from "../../utils/format";
 import type { LogListingRow } from "../logListing";
 import type { ScorerMap } from "../scoreSchema";
 
+import { primitiveText } from "./searchText";
 import type { ValueComparator } from "./types";
 
 /**
@@ -40,23 +41,6 @@ export interface LogColumnSchema {
   key: string;
 }
 
-/** Objects/arrays are skipped rather than stringified ("[object Object]"
- *  must never be searchable text) — `rowSearchText`'s rule, mirrored here
- *  so record-level search text matches the grid's shaped-row text (the
- *  parity test compares them per column). */
-const primitiveText = (value: unknown): string | null => {
-  switch (typeof value) {
-    case "string":
-      return value;
-    case "number":
-    case "boolean":
-    case "bigint":
-      return String(value);
-    default:
-      return null;
-  }
-};
-
 /** A score/metric cell's display text (the grid's score `textValue`). */
 const scoreText = (value: unknown): string | null => {
   if (typeof value === "number") return formatPrettyDecimal(value);
@@ -69,7 +53,7 @@ const scoreText = (value: unknown): string | null => {
  *  matching the AG-default comparator the pre-TanStack log list used.
  *  Missing values need explicit handling: returning 0 for NaN pairs
  *  violates transitivity and scrambles the non-NaN rows too. */
-const isMissingNumber = (v: unknown): boolean =>
+export const isMissingNumber = (v: unknown): boolean =>
   v === null ||
   v === undefined ||
   v === "" ||
@@ -84,8 +68,9 @@ export const numberCompare: ValueComparator = (a, b) => {
   return Number(a) - Number(b);
 };
 
-/** Missing dates coerce to epoch 0 (smallest), like the shared grid date
- *  comparator this mirrors. */
+/** Missing dates coerce to epoch 0 (smallest). One definition for both
+ *  sort surfaces: `gridComparators.date` consumes this for client-side
+ *  grid sorts. */
 export const dateCompare: ValueComparator = (a, b) => {
   const timeA = a ? new Date(a as string | number | Date).getTime() : 0;
   const timeB = b ? new Date(b as string | number | Date).getTime() : 0;
