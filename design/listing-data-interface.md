@@ -1,6 +1,7 @@
 # A data access interface for the log listing
 
-Status: proposed (design only — no code yet). Companion to
+Status: accepted — implementation in progress on this branch (see
+"Implementation phases"). Companion to
 [db-backed-listing-plan.md](db-backed-listing-plan.md), which documents the
 paginated listing as it currently exists on this branch.
 
@@ -121,6 +122,37 @@ doing yet"), but the proposal shrinks it.
 
 ## The proposal
 
+### The boundary rule
+
+The single sentence the restructuring enforces, in both directions:
+
+> UI components produce `Condition`/`OrderBy` values and consume rows.
+> All evaluation of those values — what a column name means, how it
+> compares, what matches — lives in the data layer.
+
+The leak runs both ways today: view code decides membership (the `toRow`
+problem above), and the data layer evaluates queries through grid column
+definitions — `accessorFn`, `sortComparator`, and `filterType` are fused
+with React cell renderers inside `useLogListColumns`, so the storage layer
+borrows the grid's display config for its evaluation semantics. The
+`accessorsKey` string is that symptom: query semantics trapped inside a
+React hook whose inputs arrive asynchronously. Consequences for where code
+lives:
+
+- `evaluator.ts`, `planner.ts`, and `applyListingQuery` move out of
+  `app/log-list/listing/` into the data layer — they are query-evaluation
+  machinery sitting in the view tree.
+- `combineFilters` (grid filter state → `Condition`) stays in the view:
+  translating UI state into the declarative query language is exactly what
+  components should do.
+- Two things are still *invoked* above the interface without violating the
+  rule, provided their logic is imported from the data layer rather than
+  defined in the view: the pending-task overlay (rows with no database
+  record, filtered/sorted/merged in memory by necessity — it must call the
+  data layer's evaluator and comparator builder, not carry its own) and
+  the find band's searchable-text function (genuinely view-defined
+  formatting; see `getMatches`).
+
 ### One interface, scout's shape
 
 Scout's UI queries a server: `getTranscripts(dir, filter, orderBy,
@@ -140,11 +172,14 @@ interface LogListingData {
     orderBy: OrderByModel[] | undefined,
     pagination: Pagination
   ): Promise<{
-    // This page's rows. Whether these are stored records (shaped into
-    // display rows above the interface) or already-shaped view rows is
-    // tied to the transitional accessor question — see "Two kinds of
-    // column names" below.
-    items: Row[];
+    // This page's stored records (with derived columns like `retried`
+    // attached). Shaping into display rows happens above the interface,
+    // per page, so returned items are data and the internal cache can be
+    // keyed by (filter, orderBy) alone. Returning shaped rows would drag
+    // view-only shaping inputs — the tasks/logs mode that picks URL and
+    // display-name shape, which no condition captures — back into cache
+    // identity: the `universe` string under a new name.
+    items: LogRecord[];
     // Count of ALL rows matching the filter, not just this page — the
     // footer count.
     totalCount: number;
@@ -278,12 +313,14 @@ cache replaces it:
 | Invalidation via the shared key root | an explicit step, below |
 | No stale-value trap (`fetchQuery` vs `ensureQueryData`) | not needed — "cleared means the next call rebuilds and awaits" is the obvious semantics of a plain cache |
 
-**Invalidation** becomes two explicit steps in
-`invalidateDatabaseLogsListings`: first clear the implementation's internal
-cache, then invalidate the react-query keys so the hooks refetch. That
-order matters — refetches must not be served the pre-write snapshot. This
-is the one coordination point the restructuring adds, in exchange for
-deleting the query-inside-query mechanism.
+**Invalidation** uses an epoch counter rather than an ordered two-step:
+the write path bumps a module-level epoch (and then invalidates the
+react-query keys, as today), and every cached snapshot records the epoch
+it was built under. A read that finds its entry's epoch stale rebuilds.
+The required ordering — refetches must not be served the pre-write
+snapshot — holds by construction instead of by call-site discipline:
+there is no clear-then-invalidate sequence to get wrong, and per-view
+instances need no registration with the write path.
 
 One thrash hazard to design around: the listing query and the overview run
 *different* filters (the overview needs the unfiltered universe, and counts
@@ -309,12 +346,18 @@ Checked against the actual condition language
   hazard. Cleaner: a `parent_dir` column (`parent_dir = 'dir'`), derivable
   from the file path during the scan now, and a real stored (and indexed)
   column later.
-- **Retried-hiding.** `retried = false` (exact representation TBD). Note
-  that "retried" is currently computed by *grouping* rows during the scan
-  (`computeLogsWithRetried`), not stored per record. The implementation
-  already derives it before filtering, so it can be exposed as a queryable
-  column immediately; persisting it at write time (already on the plan
-  doc's roadmap) is what makes it a real stored column later.
+- **Retried-hiding.** `retried = false`, with the derived column made
+  *total*: the derivation emits `false` for group winners and task-id-less
+  logs alike, `true` only for actual retried runs. Today
+  `computeLogsWithRetried` leaves task-id-less logs `undefined`, and the
+  condition evaluator implements SQL three-valued logic (NULL fails
+  negative operators too) — so the natural `retried != true` would
+  silently drop every task-id-less log. A total boolean sidesteps null
+  semantics entirely, and is the right shape for persisting at write time
+  (already on the plan doc's roadmap). "Retried" is still computed by
+  *grouping* rows during the scan, not stored per record; the
+  implementation derives it before filtering, so it is queryable
+  immediately.
 - **Valid log identity.** A parse check, not expressible in the operator
   set — and it shouldn't be. Either replication already only writes rows
   that parse (verify this), or a validity flag gets stored at write time
@@ -353,18 +396,25 @@ resolver is the beginning of a declared column schema — it can grow one
 column at a time as mappings get written down, shrinking the view-level
 residue, instead of requiring a big-bang schema migration.
 
-Until the residue is gone, the accessor functions (and their `accessorsKey`
-stand-in, since the score schema arrives asynchronously) still have to
-reach the implementation somehow. Two options, to be decided during
-implementation:
+Until the residue is gone, the accessor functions still have to reach the
+implementation somehow. Decided: **construct the data-access object per
+view**, passing accessors in once, held by a memo keyed on `accessorsKey`
+(the score schema arrives asynchronously). The internal cache lives in the
+instance, so a schema arrival means a new instance and a fresh cache — the
+lifecycle problem solves itself, and `accessorsKey` disappears from
+data-layer cache keys (it remains in the react-query hook keys, which is
+where caching results by schema belongs).
 
-- construct the data-access object per view, passing accessors in once
-  (simple, but the object must be rebuilt when the score schema lands); or
-- pass accessors per call and include `accessorsKey` in the internal cache
-  key (uglier signature, no lifecycle management).
-
-Either is acceptable as a transitional wart, because it's now confined to
-one place with a written exit path.
+The accessors themselves also stop being view code. A plain (non-React)
+column-semantics module in the data layer — `columnSchema(scorerMap)` →
+per-column `{ getValue, comparator, filterType }`, covering the static
+columns and the dynamic score/metric columns (the score schema already
+lives in `log_data/scoreSchema.ts`; only its consumption is React-shaped
+today) — becomes the source of truth. The grid consumes it for its column
+defs' `accessorFn`/`meta`, the data-access factory takes it directly, and
+display config can no longer drift from query semantics. The "view-level
+residue" then means "evaluated over shaped rows" (transitional), not
+"owned by React code".
 
 Be precise about what these warts cost: a function cannot be serialized.
 Any closure crossing the interface (the view-level accessors here, the
@@ -413,8 +463,9 @@ Gains:
 
 Costs:
 
-- Invalidation is now an explicit two-step (clear internal cache, then
-  invalidate react-query keys) that we own and must order correctly.
+- Invalidation coordination is now ours: the epoch scheme makes the
+  ordering hold by construction, but it is hand-rolled state where
+  react-query previously owned the lifecycle.
 - The internal cache is hand-rolled state: it must cache promises for
   deduplication, and must be per-instance (or resettable) so tests don't
   fight singleton state.
@@ -427,18 +478,51 @@ Costs:
   the implementation now; persist them at write time later; verify (or
   enforce) at the write path that only valid log identities are written.
 
-## Open questions
+## Resolved questions
 
-- What `getPage` returns in `items`: stored records (with display shaping
-  applied above the interface, per page) or already-shaped view rows. Tied
-  to the per-view vs. per-call accessor question below.
-- Whether `getOverview`'s membership inputs (`showRetriedLogs`, the
-  validity rule) should also be expressed as conditions for symmetry, or
-  stay as named options since the method intentionally reports across
-  several membership variants at once.
-- Per-view construction vs. per-call accessors for the transitional
-  view-level column evaluation (see the resolver section).
-- Representation of `retried` in conditions (`= false` vs `IS NULL`
-  semantics for never-retried rows).
-- Whether the samples listing (which still uses the old fully-in-memory
-  query) adopts the same interface now or later.
+- **`getPage` returns stored records**, shaped above the interface per
+  page (see the interface sketch). The snapshot's inline first page holds
+  records too, or is dropped.
+- **`getOverview` keeps named options** rather than conditions: the method
+  deliberately reports across several membership variants in one scan;
+  forcing them into conditions would be symmetry for its own sake.
+- **Per-view construction** for the transitional accessors, with the
+  column-semantics module as their source (see "Two kinds of column
+  names").
+- **`retried` is a total boolean column** and the condition is
+  `retried = false` (see the membership section for the three-valued-logic
+  trap that rules out `retried != true`).
+- **The samples listing adopts the interface later** — it has no
+  database-backed path yet; nothing forces convergence now.
+
+Still open:
+
+- Whether the "valid log identity" membership rule exists at all on this
+  branch: `fileLogIdentity` returns `undefined` only for the folder-scope
+  case, and replication may already guarantee parseable names. Verify at
+  the write path during implementation; if guaranteed, membership is two
+  conditions, not three.
+
+## Implementation phases
+
+Each phase lands independently green:
+
+1. **Extract the interface, internalize the snapshot.** Define the
+   data-access factory; move the snapshot from a react-query entry to an
+   instance-level promise cache (a small keyed map, so the listing and
+   overview reads don't thrash each other) with epoch invalidation. The
+   hooks become thin wrappers; `databaseLogsListingSnapshotKey` and
+   `fetchLogsListingSnapshot` are deleted. Behavior-neutral.
+2. **Membership becomes conditions.** Derive `parent_dir` and total
+   `retried` as record-level queryable columns during the scan; the view
+   composes `scope AND userFilter`; the implementation derives its scan
+   prefix from the condition (the optimization survives, the duplication
+   dies); `toRow` shrinks to pure shaping. The `universe` string, the
+   duplicated prefix, and `isCandidate` are deleted.
+3. **Column semantics and the resolver.** Extract the column-semantics
+   module from `useLogListColumns`; move the evaluation machinery
+   (`evaluator.ts`, `planner.ts`, `applyListingQuery`) into the data
+   layer; the evaluator resolves record-level columns against stored
+   records first, falling back to the schema-driven accessors over shaped
+   rows; `getPage` switches to records-out with shaping lifted into the
+   view.
