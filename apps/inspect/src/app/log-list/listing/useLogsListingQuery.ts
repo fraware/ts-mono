@@ -20,7 +20,7 @@ import type {
   ValueAccessor,
   ValueComparator,
 } from "../../../log_data";
-import { databaseLogsListingKey, listingKeyUniverse } from "../../../log_data";
+import { databaseLogsListingKey, listingKeyScope } from "../../../log_data";
 
 import { applyListingQuery } from "./applyListingQuery";
 
@@ -75,11 +75,12 @@ export function useLogsListingQuery<TRow>({
  *  data instance (and its snapshot cache — a page fetch and a Find scan
  *  of the same query dedupe into one scan). */
 export interface LogsListingDescriptor<TRow> {
-  /** Cache identity of the row universe: everything the instance's `toRow`
-   *  reads beyond the record itself (view mode, directory, display
-   *  toggles). `undefined` while the scope is still hydrating — disables
-   *  queries. */
-  universe: string | undefined;
+  /** The view's data scope (`mode::currentDir` — the same key the panel
+   *  files grid state under): what shaping reads beyond the record and the
+   *  filter. Display toggles like retried-hiding are NOT here — they are
+   *  filter conditions now. `undefined` while the scope is still
+   *  hydrating — disables queries. */
+  scopeKey: string | undefined;
   /** The view's listing data access (see `createLogsListingData`) —
    *  constructed by the panel, memoized on the view inputs. */
   data: LogsListingData<TRow>;
@@ -158,10 +159,10 @@ export function useDatabaseLogsListingQuery<TRow>({
   accessorsKey,
   listing,
 }: UseDatabaseLogsListingParams<TRow>): DatabaseLogsListing<TRow> {
-  const { universe, data: listingData } = listing;
+  const { scopeKey, data: listingData } = listing;
   const queryKey = useMemo(
-    () => databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
-    [universe, accessorsKey, filter, orderBy]
+    () => databaseLogsListingKey(scopeKey, accessorsKey, filter, orderBy),
+    [scopeKey, accessorsKey, filter, orderBy]
   );
   // The pending ensure-offset request, tagged with the query it was issued
   // against by key *value* (react-query's own hash), not input references:
@@ -224,14 +225,14 @@ export function useDatabaseLogsListingQuery<TRow>({
     // logs mirror still holds every row (plan doc, step 7) — bounded
     // windows arrive with the range-driven page queries sketched there.
     select,
-    enabled: universe !== undefined,
+    enabled: scopeKey !== undefined,
     // Keep showing the previous result across re-filters/sorts — and schema
     // arrivals — within one universe (same row set, possibly re-evaluated);
     // a different universe's rows must not leak in.
     placeholderData: (previousData, previousQuery) =>
-      universe !== undefined &&
+      scopeKey !== undefined &&
       previousQuery !== undefined &&
-      listingKeyUniverse(previousQuery.queryKey) === universe
+      listingKeyScope(previousQuery.queryKey) === scopeKey
         ? previousData
         : undefined,
     staleTime: 0,
@@ -355,7 +356,7 @@ export interface LogsListingMatches {
 /**
  * The find band's data-level match query, beside the row query so the two
  * share key shape and universe semantics: the key is the row query's key
- * (same universe slot, so `listingKeyUniverse` and the root invalidation
+ * (same universe slot, so `listingKeyScope` and the root invalidation
  * cover both) extended with the find-only inputs, and the placeholder keeps
  * previous matches only within one universe — folder-mode row ids are
  * basenames, so another directory's ids could otherwise mark unrelated
@@ -384,10 +385,10 @@ export function useLogsListingMatches<TRow>({
     setMatchTerm("");
   }, [syncMatchTerm]);
 
-  const { universe, data: listingData } = listing;
+  const { scopeKey, data: listingData } = listing;
   const query = useQuery({
     queryKey: [
-      ...databaseLogsListingKey(universe, accessorsKey, filter, orderBy),
+      ...databaseLogsListingKey(scopeKey, accessorsKey, filter, orderBy),
       "find",
       matchTerm,
       searchKey,
@@ -399,16 +400,16 @@ export function useLogsListingMatches<TRow>({
         getRowId,
         rowText,
       }),
-    enabled: enabled && matchTerm !== "" && universe !== undefined,
+    enabled: enabled && matchTerm !== "" && scopeKey !== undefined,
     // Keep the previous matches while a keystroke's refetch is in flight —
     // within one universe only (see the docstring above).
     placeholderData: (
       previousData: LogsListingMatch[] | undefined,
       previousQuery
     ) =>
-      universe !== undefined &&
+      scopeKey !== undefined &&
       previousQuery !== undefined &&
-      listingKeyUniverse(previousQuery.queryKey) === universe
+      listingKeyScope(previousQuery.queryKey) === scopeKey
         ? previousData
         : undefined,
     staleTime: 0,

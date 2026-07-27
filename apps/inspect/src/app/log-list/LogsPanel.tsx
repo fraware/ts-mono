@@ -2,6 +2,8 @@ import clsx from "clsx";
 import { FC, useCallback, useEffect, useMemo, useState } from "react";
 import { Navigate } from "react-router";
 
+import { Column } from "@tsmono/inspect-common/query";
+import type { Condition } from "@tsmono/inspect-common/query";
 import { EvalSet } from "@tsmono/inspect-common/types";
 import { ErrorPanel, ProgressBar } from "@tsmono/react/components";
 import { useProperty } from "@tsmono/react/hooks";
@@ -87,13 +89,25 @@ export const LogsPanel: FC<LogsPanelProps> = ({
   // a half-initialized scope.
   const scopeKey = logDir === undefined ? undefined : `${mode}::${currentDir}`;
 
-  // Cache identity of the row universe: the listing/overview queries depend
-  // on everything the view mapping reads, so it carries the display toggle
-  // along with the view scope.
-  const universe =
-    scopeKey === undefined
+  // Row-universe membership as filter conditions over record columns
+  // (design/listing-data-interface.md): folder mode lists the current
+  // directory's direct children, and retried runs are hidden unless the
+  // toggle shows them. ANDed with the user's column filters in
+  // useLogListData; the data layer derives its scan prefix from the
+  // parent_dir term.
+  const scopeFilter = useMemo<Condition | undefined>(() => {
+    const dir =
+      mode === "logs"
+        ? new Column("parent_dir").eq(
+            currentDir.endsWith("/") ? currentDir.slice(0, -1) : currentDir
+          )
+        : undefined;
+    const retried = showRetriedLogs
       ? undefined
-      : `${scopeKey}::retried=${showRetriedLogs}`;
+      : new Column("retried").eq(false);
+    if (dir && retried) return dir.and(retried);
+    return dir ?? retried;
+  }, [mode, currentDir, showRetriedLogs]);
 
   const flowData = useFlowQuery(logPath || "").data;
 
@@ -104,13 +118,8 @@ export const LogsPanel: FC<LogsPanelProps> = ({
   }, [logDir]);
 
   const itemView: FileLogItemView = useMemo(
-    () => ({ mode, logDir, currentDir, showRetriedLogs }),
-    [mode, logDir, currentDir, showRetriedLogs]
-  );
-
-  const isCandidate = useCallback(
-    (log: LogListingRow) => fileLogIdentity(log.name, itemView) !== undefined,
-    [itemView]
+    () => ({ mode, logDir, currentDir }),
+    [mode, logDir, currentDir]
   );
 
   const busy = sync.busy;
@@ -157,35 +166,30 @@ export const LogsPanel: FC<LogsPanelProps> = ({
     () =>
       createLogsListingData<LogListRow>({
         logDir,
-        // Match the row universe: folder mode lists the current directory,
-        // the flat tasks view lists the whole log dir (like `scopeDir`
-        // above) — a narrower scan prefix would silently drop matching rows
-        // outside it.
-        prefix: mode === "logs" ? currentDir : logDir,
         toRow,
         getValue,
         getComparator,
         getFilterType,
       }),
-    [logDir, mode, currentDir, toRow, getValue, getComparator, getFilterType]
+    [logDir, toRow, getValue, getComparator, getFilterType]
   );
 
   // One descriptor shared by the row query (useLogListData) and the grid's
-  // find-band match query, so they can never disagree about the universe —
-  // and so both read through one instance (sharing its snapshot cache).
+  // find-band match query, so they can never disagree about the row
+  // universe — and so both read through one instance (sharing its snapshot
+  // cache).
   const listing = useMemo<LogsListingDescriptor<LogListRow>>(
-    () => ({ universe, data: listingData }),
-    [universe, listingData]
+    () => ({ scopeKey, data: listingData }),
+    [scopeKey, listingData]
   );
 
   const overviewQuery = useLogsOverview({
     logDir,
-    universe,
+    scopeKey,
     data: listingData,
-    view: {
+    options: {
       folderDir: mode === "logs" ? currentDir : undefined,
       showRetriedLogs,
-      isCandidate,
     },
   });
   const overview = overviewQuery.data;
@@ -218,6 +222,7 @@ export const LogsPanel: FC<LogsPanelProps> = ({
   const listData = useLogListData({
     overlayItems: logItems,
     scopeKey,
+    scopeFilter,
     getValue,
     getComparator,
     getFilterType,

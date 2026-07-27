@@ -16,7 +16,7 @@ export const databaseLogsListingKeyRoot = [
 ] as const;
 
 export const databaseLogsListingKey = (
-  universe: string | undefined,
+  scopeKey: string | undefined,
   accessorsKey: string,
   filter?: Condition,
   orderBy?: OrderByModel[],
@@ -24,16 +24,16 @@ export const databaseLogsListingKey = (
 ) =>
   [
     ...databaseLogsListingKeyRoot,
-    universe ?? null,
+    scopeKey ?? null,
     accessorsKey,
     filter ?? null,
     orderBy ?? null,
     pagination ?? null,
   ] as const;
 
-/** The universe slot of a {@link databaseLogsListingKey} — for same-universe
+/** The scope slot of a {@link databaseLogsListingKey} — for same-scope
  *  checks (placeholders) without hard-coding the key shape at call sites. */
-export const listingKeyUniverse = (queryKey: readonly unknown[]): unknown =>
+export const listingKeyScope = (queryKey: readonly unknown[]): unknown =>
   queryKey[databaseLogsListingKeyRoot.length];
 
 /**

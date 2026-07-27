@@ -138,7 +138,7 @@ describe("LogListGrid Find pagination", () => {
         sorting={[]}
         busy={false}
         listing={{
-          universe: "logs::/logs",
+          scopeKey: "logs::/logs",
           // Never called here: useLogsListingMatches is mocked above.
           data: {
             getPage: () => Promise.reject(new Error("unused")),

@@ -31,6 +31,12 @@ export type LogListingRow = Log & { retried?: boolean };
  * status is `started` or `success` rank above other statuses; ties are
  * broken by filename descending so the newest run wins. The winner is
  * marked `retried: false`; the rest are marked `retried: true`.
+ *
+ * The mark is *total*: a log without a task_id (older log format) can never
+ * be grouped, so it gets `retried: false` rather than `undefined`. The
+ * retried-hiding membership rule is the condition `retried = false`, and
+ * the condition evaluator implements SQL null semantics (NULL fails every
+ * comparison) — a partial column would silently drop task-id-less logs.
  */
 export const computeLogsWithRetried = (logs: Log[]): LogListingRow[] => {
   const logsByGroup = logs.reduce((acc: Record<string, Log[]>, log) => {
@@ -65,8 +71,9 @@ export const computeLogsWithRetried = (logs: Log[]): LogListingRow[] => {
     (log) =>
       bestByName[log.name] ?? {
         ...log,
-        // task_id is optional for backward compatibility, only new logs files can be skippable
-        retried: log.task_id ? true : undefined,
+        // task_id is optional for backward compatibility; only new log files
+        // can be retried (a task-id-less log is never grouped).
+        retried: log.task_id ? true : false,
       }
   );
 };

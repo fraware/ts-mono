@@ -3,7 +3,8 @@ import type {
   OrderByModel,
   Pagination,
 } from "@tsmono/inspect-common/query";
-import { ensureTrailingSlash, isInDirectory } from "@tsmono/util";
+import type { FilterType } from "@tsmono/inspect-components/columnFilter";
+import { dirname, ensureTrailingSlash, isInDirectory } from "@tsmono/util";
 
 import type { Log } from "../client/api/types";
 import { scopePrefix } from "../client/database";
@@ -61,13 +62,75 @@ const scanRows = async (logDir: string, prefix: string): Promise<Log[]> => {
   return getLogRows(logDir).filter((row) => row.name.startsWith(scope));
 };
 
+/** A scanned record beside its shaped view row — what listing plans
+ *  evaluate over, so conditions can resolve record-level columns against
+ *  the record and view-level columns through the row (see
+ *  "Two kinds of column names" in design/listing-data-interface.md). */
+export interface ListingEntry<TRow> {
+  log: LogListingRow;
+  row: TRow;
+}
+
+/**
+ * Record-level condition columns, evaluated against stored records rather
+ * than through view accessors: the membership terms a future backend can
+ * push into indexed WHERE clauses. Deliberately minimal — only names with
+ * no grid column of the same name, so resolution order can never change a
+ * user filter's meaning.
+ */
+const kRecordColumns: Record<
+  string,
+  ((log: LogListingRow) => unknown) | undefined
+> = {
+  /** The record's exact parent directory. `parent_dir = <dir>` is the
+   *  folder view's direct-children membership (`isInDirectory` is the same
+   *  dirname equality). */
+  parent_dir: (log) => dirname(log.name),
+  /** Total (see `computeLogsWithRetried`): `retried = false` is the
+   *  retried-hiding membership and must keep task-id-less logs. */
+  retried: (log) => log.retried ?? false,
+};
+
+const kRecordFilterTypes: Record<string, FilterType | undefined> = {
+  parent_dir: "string",
+  retried: "boolean",
+};
+
+/**
+ * Narrow a scan to a directory subtree when the filter pins `parent_dir`:
+ * only AND branches are walked (an equality under OR/NOT can't narrow the
+ * scan). The subtree scan is a superset of the equality's direct children;
+ * the condition itself does the exact filtering — one representation, with
+ * the prefix derived rather than passed alongside (the two can't drift).
+ */
+const scanPrefixFromFilter = (logDir: string, filter?: Condition): string => {
+  const walk = (condition: Condition): string | undefined => {
+    if (condition.compound) {
+      if (condition.operator !== "AND") return undefined;
+      return (
+        walk(condition.left) ??
+        (condition.right ? walk(condition.right) : undefined)
+      );
+    }
+    return condition.operator === "=" &&
+      condition.left === "parent_dir" &&
+      typeof condition.right === "string"
+      ? condition.right
+      : undefined;
+  };
+  return (filter && walk(filter)) ?? logDir;
+};
+
 /**
  * Run a listing plan over `logDir`'s rows: scan the source, mark retried
  * runs (a cross-row derivation, so it runs over the scan, before `toRow`),
- * shape each record through `toRow` (which owns row-universe membership —
- * it drops records the view has no row for), then filter and sort. Each
- * surviving row is returned beside its source record: the snapshot build
- * needs the record's key and retried mark, the row readers just the rows.
+ * shape each record through `toRow`, then filter and sort over the
+ * (record, row) entries. Row-universe membership lives in the plan's
+ * filter (scope conditions over record columns); `toRow` may still return
+ * `undefined` for a record it cannot shape (folder mode can't name a
+ * record outside the listed directory), which the scope condition excludes
+ * anyway. Each entry keeps its source record: the snapshot build needs the
+ * record's key and retried mark, the row readers just the rows.
  *
  * Deliberately NOT gated on the scope's sync state: results reflect
  * whatever has replicated so far — a warm cache from a prior session, or a
@@ -75,10 +138,10 @@ const scanRows = async (logDir: string, prefix: string): Promise<Log[]> => {
  * observers as further writes land. Callers surface sync progress
  * separately rather than hiding rows behind it.
  *
- * `prefix` narrows the scan (folder mode lists a subdirectory). Retried
- * grouping keys on a row's exact parent directory, so a boundary-safe
- * prefix scan never splits a group and the marking matches a whole-dir
- * scan's.
+ * `prefix` narrows the scan (derived from the filter's `parent_dir` term —
+ * see {@link scanPrefixFromFilter}). Retried grouping keys on a row's
+ * exact parent directory, so a boundary-safe prefix scan never splits a
+ * group and the marking matches a whole-dir scan's.
  *
  * `sorted: false` skips the plan's ordering, for callers that impose their
  * own (the match projection orders by snapshot key position).
@@ -87,41 +150,33 @@ const scanListingEntries = async <TRow>(
   logDir: string,
   prefix: string,
   toRow: (log: LogListingRow) => TRow | undefined,
-  plan: DatabaseListingPlan<TRow>,
+  plan: DatabaseListingPlan<ListingEntry<TRow>>,
   options?: { sorted: boolean }
-): Promise<{ log: LogListingRow; row: TRow }[]> => {
+): Promise<ListingEntry<TRow>[]> => {
   const scanned = await scanRows(logDir, prefix);
-  const entries: { log: LogListingRow; row: TRow }[] = [];
+  const entries: ListingEntry<TRow>[] = [];
   for (const log of computeLogsWithRetried(scanned)) {
     const row = toRow(log);
-    if (row !== undefined && plan.matches(row)) entries.push({ log, row });
+    if (row === undefined) continue;
+    const entry = { log, row };
+    if (plan.matches(entry)) entries.push(entry);
   }
   // Stable sort over the scan's listing order (mtime-descending), so ties —
   // and the unsorted listing — keep that order without a position tiebreak.
   if (plan.compare && options?.sorted !== false) {
-    const compare = plan.compare;
-    entries.sort((a, b) => compare(a.row, b.row));
+    entries.sort(plan.compare);
   }
   return entries;
 };
 
-const scanListingRows = async <TRow>(
+const readLogsListing = async <TRow>(
   logDir: string,
   prefix: string,
   toRow: (log: LogListingRow) => TRow | undefined,
-  plan: DatabaseListingPlan<TRow>
-): Promise<TRow[]> => {
-  const entries = await scanListingEntries(logDir, prefix, toRow, plan);
-  return entries.map((entry) => entry.row);
-};
-
-export const readLogsListing = async <TRow>(
-  logDir: string,
-  prefix: string,
-  toRow: (log: LogListingRow) => TRow | undefined,
-  plan: DatabaseListingPlan<TRow>
+  plan: DatabaseListingPlan<ListingEntry<TRow>>
 ): Promise<DatabaseListingResult<TRow>> => {
-  const rows = await scanListingRows(logDir, prefix, toRow, plan);
+  const entries = await scanListingEntries(logDir, prefix, toRow, plan);
+  const rows = entries.map((entry) => entry.row);
   const total_count = rows.length;
   return { ...pageRows(rows, plan.pagination), total_count };
 };
@@ -160,7 +215,7 @@ export const readLogsListingSnapshot = async <TRow>(
   logDir: string,
   prefix: string,
   toRow: (log: LogListingRow) => TRow | undefined,
-  plan: DatabaseListingPlan<TRow>,
+  plan: DatabaseListingPlan<ListingEntry<TRow>>,
   firstPageSize: number
 ): Promise<LogsListingSnapshot<TRow>> => {
   const entries = await scanListingEntries(logDir, prefix, toRow, plan);
@@ -169,7 +224,7 @@ export const readLogsListingSnapshot = async <TRow>(
   const taskIds = new Set<string>();
   for (const { log } of entries) {
     keys.push(log.name);
-    if (log.retried !== undefined) retried[log.name] = log.retried;
+    retried[log.name] = log.retried ?? false;
     if (log.task_id) taskIds.add(log.task_id);
   }
   const firstPage = entries.slice(0, firstPageSize).map((entry) => entry.row);
@@ -193,7 +248,7 @@ export const readLogsListingSnapshot = async <TRow>(
 const readSnapshotPageRows = async <TRow>(
   snapshot: LogsListingSnapshot<TRow>,
   toRow: (log: LogListingRow) => TRow | undefined,
-  plan: DatabaseListingPlan<TRow>,
+  plan: DatabaseListingPlan<ListingEntry<TRow>>,
   offset: number,
   limit: number
 ): Promise<TRow[]> => {
@@ -204,8 +259,9 @@ const readSnapshotPageRows = async <TRow>(
   for (const key of keys) {
     const record = records[key];
     if (record === undefined) continue;
-    const row = toRow({ ...record, retried: snapshot.retried[key] });
-    if (row !== undefined && plan.matches(row)) rows.push(row);
+    const log = { ...record, retried: snapshot.retried[key] };
+    const row = toRow(log);
+    if (row !== undefined && plan.matches({ log, row })) rows.push(row);
   }
   return rows;
 };
@@ -221,16 +277,19 @@ export interface LogsListingPageResult<
   universe_task_ids?: string[];
 }
 
-/** View inputs for {@link readLogsOverview}. */
-export interface LogsOverviewView {
-  /** Folder-mode current directory; unset in the flat tasks view (which
-   *  lists the whole dir and derives no folders). */
+/** Options for {@link readLogsOverview}. Named options rather than
+ *  conditions because the overview deliberately reports across several
+ *  membership variants in one scan (`retriedCount` counts exactly what
+ *  retried-hiding removes; `taskIds` spans the whole dir regardless). */
+export interface LogsOverviewOptions {
+  /** Folder-mode current directory: file facts count its direct children
+   *  (the listing's `parent_dir` membership) and its immediate
+   *  subdirectories are derived. Unset in the flat tasks view, which lists
+   *  the whole dir and derives no folders. */
   folderDir?: string;
+  /** Whether the listing shows retried runs — mirrors the listing's
+   *  retried-hiding in the counts. */
   showRetriedLogs: boolean;
-  /** Pre-hide row-universe membership for the view (`fileLogIdentity`
-   *  presence — path logic only; the overview applies retried-hiding
-   *  itself so it can also count what hiding removed). */
-  isCandidate: (log: LogListingRow) => boolean;
 }
 
 /** Aggregate facts about a scope that the log-list page needs beyond the
@@ -312,10 +371,16 @@ const deriveFolders = (
  */
 export const readLogsOverview = async (
   logDir: string,
-  view: LogsOverviewView
+  options: LogsOverviewOptions
 ): Promise<LogsOverview> => {
   const scanned = await scanRows(logDir, logDir);
   const rows = computeLogsWithRetried(scanned);
+
+  // The listing's directory membership (`parent_dir = folderDir`): file
+  // facts count what the listing lists; the tasks view lists the whole dir.
+  const isCandidate = (log: LogListingRow): boolean =>
+    options.folderDir === undefined ||
+    isInDirectory(log.name, options.folderDir);
 
   const taskIds = new Set<string>();
   let fileCount = 0;
@@ -324,10 +389,10 @@ export const readLogsOverview = async (
   let soleFileName: string | undefined;
   for (const log of rows) {
     if (log.task_id) taskIds.add(log.task_id);
-    if (!view.isCandidate(log)) continue;
+    if (!isCandidate(log)) continue;
     if (log.retried) {
       retriedCount += 1;
-      if (!view.showRetriedLogs) continue;
+      if (!options.showRetriedLogs) continue;
     }
     fileCount += 1;
     soleFileName = fileCount === 1 ? log.name : undefined;
@@ -341,7 +406,9 @@ export const readLogsOverview = async (
     retriedCount,
     soleFileName,
     folders:
-      view.folderDir === undefined ? [] : deriveFolders(rows, view.folderDir),
+      options.folderDir === undefined
+        ? []
+        : deriveFolders(rows, options.folderDir),
   };
 };
 
@@ -370,21 +437,18 @@ export interface LogsListingFindQuery<TRow> {
 
 /**
  * Everything the view supplies to construct a {@link LogsListingData}:
- * where rows are read from (`logDir`/`prefix`), how records shape into view
- * rows (`toRow`, which also owns row-universe membership until the
- * membership rules move into filter conditions), and the view-level column
- * accessors that conditions and sorts are transitionally evaluated through
- * (see design/listing-data-interface.md for both exit paths).
+ * where rows are read from (`logDir`), how records shape into view rows
+ * (`toRow`), and the view-level column accessors that conditions and sorts
+ * are transitionally evaluated through (see design/listing-data-interface.md
+ * for the exit path). Row-universe membership is NOT here: it arrives as
+ * filter conditions over record columns (`parent_dir`, `retried`).
  */
 export interface LogsListingView<TRow> {
   logDir: string;
-  /** Row-universe scan prefix (folder mode lists a subdirectory). Must stay
-   *  consistent with what `toRow` accepts — a narrower prefix would
-   *  silently drop matching rows. Deleted when membership moves into the
-   *  filter condition (the prefix derives from it). */
-  prefix: string;
-  /** Shape a source record into the view's row, or `undefined` when the
-   *  view has no row for it (row-universe membership). */
+  /** Shape a source record into the view's display row. `undefined` means
+   *  the view cannot shape this record (folder mode can't name a record
+   *  outside the listed directory) — a shaping guard, not a membership
+   *  rule; the scope conditions exclude such records anyway. */
   toRow: (log: LogListingRow) => TRow | undefined;
   /** Reads a row's raw value for a column id. */
   getValue: ValueAccessor<TRow>;
@@ -440,7 +504,7 @@ export interface LogsListingData<TRow> {
    * because its numbers deliberately span *different* membership variants
    * in one answer (see {@link readLogsOverview}).
    */
-  getOverview(view: LogsOverviewView): Promise<LogsOverview>;
+  getOverview(options: LogsOverviewOptions): Promise<LogsOverview>;
 }
 
 /** The active query's snapshot plus the previous one, which may still be
@@ -461,18 +525,35 @@ const kSnapshotCacheEntries = 2;
 export const createLogsListingData = <TRow>(
   view: LogsListingView<TRow>
 ): LogsListingData<TRow> => {
-  const { logDir, prefix, toRow } = view;
+  const { logDir, toRow } = view;
+
+  // The resolver ("Two kinds of column names, one resolver" in the design
+  // doc): record-level columns evaluate against the stored record, all
+  // others through the view accessors over the shaped row. It can grow one
+  // declared column at a time, shrinking the view-level residue.
+  const entryValue = (entry: ListingEntry<TRow>, columnId: string): unknown => {
+    const recordColumn = kRecordColumns[columnId];
+    return recordColumn !== undefined
+      ? recordColumn(entry.log)
+      : view.getValue(entry.row, columnId);
+  };
+  const entryComparator = (columnId: string): ValueComparator | undefined =>
+    kRecordColumns[columnId] !== undefined
+      ? undefined
+      : view.getComparator(columnId);
+  const entryFilterType = (columnId: string): FilterType | undefined =>
+    kRecordFilterTypes[columnId] ?? view.getFilterType?.(columnId);
 
   const compilePlan = (
     filter: Condition | undefined,
     orderBy: OrderByModel[] | undefined
-  ): DatabaseListingPlan<TRow> =>
+  ): DatabaseListingPlan<ListingEntry<TRow>> =>
     createListingPlan({
       filter,
       orderBy,
-      getValue: view.getValue,
-      getComparator: view.getComparator,
-      getFilterType: view.getFilterType,
+      getValue: entryValue,
+      getComparator: entryComparator,
+      getFilterType: entryFilterType,
     });
 
   // The snapshot cache. Promise-valued so concurrent page and Find reads of
@@ -497,7 +578,7 @@ export const createLogsListingData = <TRow>(
   const fetchSnapshot = (
     filter: Condition | undefined,
     orderBy: OrderByModel[] | undefined,
-    plan: DatabaseListingPlan<TRow>,
+    plan: DatabaseListingPlan<ListingEntry<TRow>>,
     firstPageSize: number
   ): Promise<LogsListingSnapshot<TRow>> => {
     const key = snapshotKey(filter, orderBy);
@@ -513,7 +594,7 @@ export const createLogsListingData = <TRow>(
       epoch,
       promise: readLogsListingSnapshot(
         logDir,
-        prefix,
+        scanPrefixFromFilter(logDir, filter),
         toRow,
         plan,
         firstPageSize
@@ -546,7 +627,12 @@ export const createLogsListingData = <TRow>(
       // per read stays the simpler, equally-cheap form. No
       // universe_task_ids: the single page IS the whole universe, so the
       // anti-join's loaded-window fallback already covers it.
-      return readLogsListing(logDir, prefix, toRow, plan);
+      return readLogsListing(
+        logDir,
+        scanPrefixFromFilter(logDir, filter),
+        toRow,
+        plan
+      );
     }
     const snapshot = await fetchSnapshot(
       filter,
@@ -594,6 +680,7 @@ export const createLogsListingData = <TRow>(
     find: LogsListingFindQuery<TRow>
   ): Promise<LogsListingMatch[]> => {
     const plan = compilePlan(filter, orderBy);
+    const prefix = scanPrefixFromFilter(logDir, filter);
     const term = find.term.toLowerCase();
     const toMatch = (row: TRow, offset: number): LogsListingMatch => {
       const orderValues = orderBy?.length
@@ -606,10 +693,10 @@ export const createLogsListingData = <TRow>(
     };
 
     if (logsListingSource(logDir) === "cache") {
-      const rows = await scanListingRows(logDir, prefix, toRow, plan);
+      const entries = await scanListingEntries(logDir, prefix, toRow, plan);
       const matches: LogsListingMatch[] = [];
-      for (let offset = 0; offset < rows.length; offset++) {
-        const row = rows[offset]!;
+      for (let offset = 0; offset < entries.length; offset++) {
+        const row = entries[offset]!.row;
         if (find.rowText(row).includes(term)) {
           matches.push(toMatch(row, offset));
         }

@@ -495,13 +495,16 @@ Costs:
 - **The samples listing adopts the interface later** — it has no
   database-backed path yet; nothing forces convergence now.
 
-Still open:
-
-- Whether the "valid log identity" membership rule exists at all on this
-  branch: `fileLogIdentity` returns `undefined` only for the folder-scope
-  case, and replication may already guarantee parseable names. Verify at
-  the write path during implementation; if guaranteed, membership is two
-  conditions, not three.
+- **The "valid log identity" rule doesn't exist** (verified during phase
+  2): `fileLogIdentity` returns `undefined` only for the folder-scope case
+  — it is pure path scoping, not a parse check. Membership is two
+  conditions (`parent_dir`, `retried`), not three.
+- **A scope key survives the `universe` string's deletion** — but as the
+  panel's existing `mode::currentDir` grid-state key, not a hand-maintained
+  cache stand-in. It carries what shaping reads beyond the record and the
+  filter (the tasks/logs mode that picks URL shape); display toggles like
+  retried-hiding live in the filter, so toggling them now keeps previous
+  rows as placeholder data instead of blanking.
 
 ## Implementation phases
 

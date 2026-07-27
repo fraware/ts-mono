@@ -96,12 +96,12 @@ export {
   databaseLogsListingKey,
   databaseLogsListingKeyRoot,
   invalidateDatabaseLogsListings,
-  listingKeyUniverse,
+  listingKeyScope,
 } from "./databaseListings";
 export {
   createLogsListingData,
-  readLogsListing,
   readLogsOverview,
+  type ListingEntry,
   type LogsListingData,
   type LogsListingFindQuery,
   type LogsListingMatch,
@@ -109,7 +109,7 @@ export {
   type LogsListingSnapshot,
   type LogsListingView,
   type LogsOverview,
-  type LogsOverviewView,
+  type LogsOverviewOptions,
 } from "./logsListingRead";
 export { evaluateCondition, compareByOrderBy } from "./listing/evaluator";
 export { createListingPlan } from "./listing/planner";

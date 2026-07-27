@@ -21,13 +21,11 @@ import {
   type DatabaseService,
 } from "../client/database/service";
 
-import { createListingPlan } from "./listing/planner";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
 import { setRows, writeListing } from "./logsContent";
 import { bumpLogsListingEpoch } from "./logsListingEpoch";
 import {
   createLogsListingData,
-  readLogsListing,
   readLogsOverview,
   type LogsListingData,
   type LogsListingPageResult,
@@ -61,8 +59,18 @@ const preview = (overrides: Partial<LogPreview>): LogPreview => ({
 const getValue = (row: Log, column: string): unknown =>
   row[column as keyof Log];
 
-describe("readLogsListing", () => {
+describe("listing reads", () => {
   let databaseService: DatabaseService;
+
+  const createData = (logDir: string): LogsListingData<Log> =>
+    createLogsListingData<Log>({
+      logDir,
+      toRow: (log: LogListingRow) => log,
+      getValue,
+      getComparator: () => undefined,
+    });
+
+  const wholePage = { cursor: null, direction: "forward", limit: 100 } as const;
 
   beforeEach(async () => {
     databaseService = createDatabaseService();
@@ -106,33 +114,35 @@ describe("readLogsListing", () => {
     const source = (await databaseService.readLogs({
       prefix: "/test/logs",
     })) as Log[];
-    const query = {
-      filter: new Column("model")
-        .ilike("gpt%")
-        .and(new Column("status").ne("error")),
-      orderBy: [{ column: "name", direction: "DESC" as const }],
-      pagination: { limit: 1, cursor: null, direction: "forward" as const },
-      getValue,
-      getComparator: () => undefined,
-    };
+    const filter = new Column("model")
+      .ilike("gpt%")
+      .and(new Column("status").ne("error"));
+    const orderBy = [{ column: "name", direction: "DESC" as const }];
 
     // The seam marks retried runs over its scan; mirror that on the
     // in-memory side so the parity compare sees identical rows.
-    const expected = applyListingQuery(computeLogsWithRetried(source), query);
-    const actual = await readLogsListing(
-      "/test/logs",
-      "/test/logs",
-      (log: LogListingRow) => log as Log,
-      createListingPlan(query)
-    );
+    const expected = applyListingQuery(computeLogsWithRetried(source), {
+      filter,
+      orderBy,
+      pagination: { limit: 1, cursor: null, direction: "forward" as const },
+      getValue,
+      getComparator: () => undefined,
+    });
+    const actual = await createData("/test/logs").getPage(filter, orderBy, {
+      cursor: null,
+      direction: "forward",
+      limit: 1,
+    });
 
-    expect(actual).toEqual(expected);
+    const { universe_task_ids, ...parityFields } = actual;
+    expect(parityFields).toEqual(expected);
+    expect(universe_task_ids).toBeDefined();
     expect(actual.items.map((row) => row.name)).toEqual(["/test/logs/d.json"]);
     expect(actual.total_count).toBe(2);
     expect(actual.next_cursor).toEqual({ offset: 1 });
   });
 
-  test("marks retried runs across the scan and lets toRow drop them", async () => {
+  test("hides retried runs via the retried = false condition", async () => {
     // Same parent dir + task_id: the newest successful run wins, the other
     // is retried.
     await databaseService.writeLogPreviews({
@@ -140,22 +150,61 @@ describe("readLogsListing", () => {
       "/test/logs/2024-01-02_task.json": preview({ task_id: "shared" }),
     });
 
-    const rows = await readLogsListing(
-      "/test/logs",
-      "/test/logs",
-      (log: LogListingRow) => (log.retried ? undefined : log),
-      createListingPlan({ getValue, getComparator: () => undefined })
+    const data = createData("/test/logs");
+    const hidden = await data.getPage(
+      new Column("retried").eq(false),
+      undefined,
+      wholePage
     );
-    expect(rows.total_count).toBe(1);
-    expect(rows.items[0]?.name).toBe("/test/logs/2024-01-02_task.json");
+    expect(hidden.total_count).toBe(1);
+    expect(hidden.items[0]?.name).toBe("/test/logs/2024-01-02_task.json");
 
-    const all = await readLogsListing(
-      "/test/logs",
-      "/test/logs",
-      (log: LogListingRow) => log,
-      createListingPlan({ getValue, getComparator: () => undefined })
-    );
+    const all = await data.getPage(undefined, undefined, wholePage);
     expect(all.total_count).toBe(2);
+  });
+
+  test("retried = false keeps task-id-less logs (the mark is total)", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/2024-01-01_task.json": preview({ task_id: "shared" }),
+      "/test/logs/2024-01-02_task.json": preview({ task_id: "shared" }),
+      // Older log format: no task_id, so it can never be a retry — the
+      // condition must keep it (SQL null semantics would drop a partial
+      // column here).
+      "/test/logs/old.json": preview({ task_id: null as unknown as string }),
+    });
+
+    const page = await createData("/test/logs").getPage(
+      new Column("retried").eq(false),
+      [{ column: "name", direction: "ASC" }],
+      wholePage
+    );
+    expect(page.items.map((row) => row.name)).toEqual([
+      "/test/logs/2024-01-02_task.json",
+      "/test/logs/old.json",
+    ]);
+  });
+
+  test("a parent_dir condition lists direct children and narrows the scan", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task_id: "t-a" }),
+      "/test/logs/sub/b.json": preview({ task_id: "t-b" }),
+      "/test/logs/sub/nested/c.json": preview({ task_id: "t-c" }),
+    });
+    const readLogsSpy = vi.spyOn(databaseService, "readLogs");
+
+    const page = await createData("/test/logs").getPage(
+      new Column("parent_dir").eq("/test/logs/sub"),
+      undefined,
+      wholePage
+    );
+
+    // Direct children only — the nested file displays through its folder.
+    expect(page.items.map((row) => row.name)).toEqual([
+      "/test/logs/sub/b.json",
+    ]);
+    // The scan prefix derives from the condition rather than arriving as a
+    // second, manually-coordinated input.
+    expect(readLogsSpy).toHaveBeenCalledWith({ prefix: "/test/logs/sub" });
   });
 
   test("serves from the react-query cache when the database is not open", async () => {
@@ -165,11 +214,10 @@ describe("readLogsListing", () => {
     ]);
     await databaseService.closeDatabase();
 
-    const result = await readLogsListing(
-      "/cache/logs",
-      "/cache/logs",
-      (log: LogListingRow) => log,
-      createListingPlan({ getValue, getComparator: () => undefined })
+    const result = await createData("/cache/logs").getPage(
+      undefined,
+      undefined,
+      wholePage
     );
     // Scoped by boundary-safe prefix: the sibling dir's row is excluded.
     expect(result.items.map((row) => row.name)).toEqual(["/cache/logs/a.json"]);
@@ -185,11 +233,10 @@ describe("readLogsListing", () => {
       { name: "file:///real/logs/b.json" },
     ]);
 
-    const result = await readLogsListing(
-      "/alias/logs",
-      "/alias/logs",
-      (log: LogListingRow) => log,
-      createListingPlan({ getValue, getComparator: () => undefined })
+    const result = await createData("/alias/logs").getPage(
+      undefined,
+      undefined,
+      wholePage
     );
     expect(result.items.map((row) => row.name).sort()).toEqual([
       "file:///real/logs/a.json",
@@ -208,7 +255,6 @@ describe("LogsListingData.getPage", () => {
   ): LogsListingData<Log> =>
     createLogsListingData<Log>({
       logDir: "/test/logs",
-      prefix: "/test/logs",
       toRow: identityRow,
       getValue,
       getComparator: () => undefined,
@@ -424,12 +470,13 @@ describe("LogsListingData.getPage", () => {
       direction: "forward",
       limit: 100,
     });
-    const unpaged = await readLogsListing(
-      "/test/logs",
-      "/test/logs",
-      identityRow,
-      createListingPlan({ getValue, getComparator: () => undefined })
-    );
+    const source = (await databaseService.readLogs({
+      prefix: "/test/logs",
+    })) as Log[];
+    const unpaged = applyListingQuery(computeLogsWithRetried(source), {
+      getValue,
+      getComparator: () => undefined,
+    });
     // The snapshot-scoped aggregate rides beside the parity fields.
     const { universe_task_ids, ...parityFields } = paged;
     expect(parityFields).toEqual(unpaged);
@@ -628,7 +675,7 @@ describe("LogsListingData.getPage", () => {
     ]);
     await databaseService.closeDatabase();
 
-    const data = createData({ logDir: "/cache/logs", prefix: "/cache/logs" });
+    const data = createData({ logDir: "/cache/logs" });
     const page = await data.getPage(undefined, undefined, {
       cursor: null,
       direction: "forward",
@@ -658,11 +705,6 @@ describe("readLogsOverview", () => {
     await Dexie.delete(DB_NAME);
   });
 
-  const directChildOf =
-    (dir: string) =>
-    (log: LogListingRow): boolean =>
-      new RegExp(`^${dir}/[^/]+$`).test(log.name);
-
   test("aggregates folders, counts, and task ids in one scan", async () => {
     await databaseService.writeLogPreviews({
       "/test/logs/a.json": preview({ task_id: "t-a", status: "started" }),
@@ -674,7 +716,6 @@ describe("readLogsOverview", () => {
     const overview = await readLogsOverview("/test/logs", {
       folderDir: "/test/logs",
       showRetriedLogs: false,
-      isCandidate: directChildOf("/test/logs"),
     });
 
     expect(overview.taskIds.sort()).toEqual(["t-a", "t-b", "t-c", "t-d"]);
@@ -698,7 +739,6 @@ describe("readLogsOverview", () => {
     const overview = await readLogsOverview("/test/logs", {
       folderDir: "/test/logs",
       showRetriedLogs: false,
-      isCandidate: directChildOf("/test/logs"),
     });
 
     // "sub" counts its whole subtree even when first seen via the nested
@@ -717,19 +757,19 @@ describe("readLogsOverview", () => {
       "/test/logs/2024-01-01_task.json": preview({ task_id: "shared" }),
       "/test/logs/2024-01-02_task.json": preview({ task_id: "shared" }),
     });
-    const view = {
+    const options = {
+      folderDir: "/test/logs",
       showRetriedLogs: false,
-      isCandidate: directChildOf("/test/logs"),
     };
 
-    const hidden = await readLogsOverview("/test/logs", view);
+    const hidden = await readLogsOverview("/test/logs", options);
     expect(hidden.fileCount).toBe(1);
     expect(hidden.retriedCount).toBe(1);
     expect(hidden.soleFileName).toBe("/test/logs/2024-01-02_task.json");
     expect(hidden.folders).toEqual([]);
 
     const shown = await readLogsOverview("/test/logs", {
-      ...view,
+      ...options,
       showRetriedLogs: true,
     });
     expect(shown.fileCount).toBe(2);
@@ -744,7 +784,6 @@ describe("LogsListingData.getMatches", () => {
   const createData = (): LogsListingData<Log> =>
     createLogsListingData<Log>({
       logDir: "/test/logs",
-      prefix: "/test/logs",
       toRow: (log: LogListingRow) => log,
       getValue,
       getComparator: () => undefined,

@@ -58,6 +58,11 @@ interface UseLogListDataParams {
   /** Per-scope sorting/filters are read under this key (`undefined` while
    *  logDir is still hydrating — defaults apply, nothing is written). */
   scopeKey?: string;
+  /** Row-universe membership as conditions over record columns
+   *  (`parent_dir`, `retried` — built in LogsPanel). ANDed with the user's
+   *  column filters for the data queries only: overlay rows (pending
+   *  tasks) have no record, so record-column terms would drop them all. */
+  scopeFilter?: Condition;
   getValue: ValueAccessor<LogListRow>;
   getComparator: (columnId: string) => ValueComparator | undefined;
   getFilterType?: FilterTypeAccessor;
@@ -111,6 +116,7 @@ export interface LogListData {
 export const useLogListData = ({
   overlayItems,
   scopeKey,
+  scopeFilter,
   getValue,
   getComparator,
   getFilterType,
@@ -157,7 +163,15 @@ export const useLogListData = ({
     () => (scopeKey ? gridStateByScope[scopeKey]?.columnFilters : undefined),
     [gridStateByScope, scopeKey]
   );
-  const filter = useMemo(() => combineFilters(columnFilters), [columnFilters]);
+  const userFilter = useMemo(
+    () => combineFilters(columnFilters),
+    [columnFilters]
+  );
+  // What the data queries run under: membership AND the user's filters.
+  const filter = useMemo(() => {
+    if (scopeFilter && userFilter) return scopeFilter.and(userFilter);
+    return scopeFilter ?? userFilter;
+  }, [scopeFilter, userFilter]);
 
   const {
     result: { data: result, loading: pending },
@@ -189,13 +203,15 @@ export const useLogListData = ({
   );
 
   // Pending tasks have no database record: run the same query over them in
-  // memory and merge the (small) result into the query's page.
+  // memory and merge the (small) result into the query's page. Under the
+  // USER filter only — the scope conditions test record columns a pending
+  // row doesn't have (its membership is the anti-join above).
   const overlay = useMemo(
     () =>
       visiblePendingRows.length === 0
         ? undefined
         : applyListingQuery(visiblePendingRows, {
-            filter,
+            filter: userFilter,
             orderBy,
             getValue,
             getComparator,
@@ -203,7 +219,7 @@ export const useLogListData = ({
           }),
     [
       visiblePendingRows,
-      filter,
+      userFilter,
       orderBy,
       getValue,
       getComparator,

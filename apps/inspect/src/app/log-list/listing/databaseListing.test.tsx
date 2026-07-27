@@ -44,7 +44,7 @@ vi.mock("../../../log_data", () => ({
     "logs",
     ...parts.map((part) => part ?? null),
   ],
-  listingKeyUniverse: (queryKey: readonly unknown[]) => queryKey[3],
+  listingKeyScope: (queryKey: readonly unknown[]) => queryKey[3],
 }));
 
 const records = [
@@ -101,15 +101,15 @@ const fakeData: LogsListingData<Row> = {
 const listingParams = (overrides?: {
   filter?: Condition;
   orderBy?: { column: string; direction: "ASC" | "DESC" }[];
-  universe?: string | undefined;
+  scopeKey?: string | undefined;
   accessorsKey?: string;
 }) => ({
   filter: overrides?.filter,
   orderBy: overrides?.orderBy,
   accessorsKey: overrides?.accessorsKey ?? "",
   listing: {
-    universe:
-      overrides && "universe" in overrides ? overrides.universe : "logs::/logs",
+    scopeKey:
+      overrides && "scopeKey" in overrides ? overrides.scopeKey : "logs::/logs",
     data: fakeData,
   },
 });
@@ -208,11 +208,11 @@ describe("useDatabaseLogsListingQuery", () => {
     );
   });
 
-  test("stays disabled (pending) while the universe is hydrating", async () => {
+  test("stays disabled (pending) while the scopeKey is hydrating", async () => {
     const { result } = renderHook(
       () =>
         useDatabaseLogsListingQuery<Row>(
-          listingParams({ universe: undefined })
+          listingParams({ scopeKey: undefined })
         ),
       { wrapper }
     );
@@ -223,7 +223,7 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(result.current.result.data).toBeUndefined();
   });
 
-  test("keeps the previous result across re-filters within one universe", async () => {
+  test("keeps the previous result across re-filters within one scopeKey", async () => {
     const { result, rerender } = renderHook(
       (props) => useDatabaseLogsListingQuery<Row>(props),
       {
@@ -265,7 +265,7 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(holder.read).toHaveBeenCalledTimes(1);
 
     // The scorer schema arriving changes what the plan computes without any
-    // other query input changing — same universe, so the previous rows keep
+    // other query input changing — same scopeKey, so the previous rows keep
     // showing while the re-evaluated read is in flight.
     rerender(listingParams({ accessorsKey: "grader/accuracy:number" }));
     expect(result.current.result.loading).toBe(false);
@@ -462,19 +462,19 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(result.current.autoFetchPaused).toBe(false);
   });
 
-  test("does not serve one universe's rows to another", async () => {
+  test("does not serve one scopeKey's rows to another", async () => {
     const { result, rerender } = renderHook(
       (props) => useDatabaseLogsListingQuery<Row>(props),
       {
         wrapper,
-        initialProps: listingParams({ universe: "logs::/logs" }),
+        initialProps: listingParams({ scopeKey: "logs::/logs" }),
       }
     );
     await waitFor(() => expect(result.current.result.data).toBeDefined());
 
-    // A different universe (e.g. the flat tasks view at the same prefix)
+    // A different scope (e.g. the flat tasks view at the same dir)
     // must not show the folder view's rows while its own read is in flight.
-    rerender(listingParams({ universe: "tasks::/logs" }));
+    rerender(listingParams({ scopeKey: "tasks::/logs" }));
     expect(result.current.result.data).toBeUndefined();
     expect(result.current.result.loading).toBe(true);
     await waitFor(() => expect(result.current.result.data).toBeDefined());
@@ -528,9 +528,9 @@ describe("useLogsListingMatches", () => {
   const matchesParams = (overrides?: {
     term?: string;
     enabled?: boolean;
-    universe?: string;
+    scopeKey?: string;
   }) => ({
-    ...listingParams({ universe: overrides?.universe ?? "logs::/logs" }),
+    ...listingParams({ scopeKey: overrides?.scopeKey ?? "logs::/logs" }),
     term: overrides?.term ?? "",
     enabled: overrides?.enabled ?? true,
     getRowId: (row: Row) => row.name,
@@ -572,7 +572,7 @@ describe("useLogsListingMatches", () => {
     expect(result.current.matches).toEqual([]);
   });
 
-  test("does not serve one universe's matches to another", async () => {
+  test("does not serve one scopeKey's matches to another", async () => {
     const { result, rerender } = renderHook(
       (props) => useLogsListingMatches<Row>(props),
       {
@@ -585,7 +585,7 @@ describe("useLogsListingMatches", () => {
 
     // Folder-mode ids are basenames, so another scope's matches could mark
     // unrelated same-named rows as matches — they must not carry over.
-    rerender(matchesParams({ term: "claude", universe: "tasks::/logs" }));
+    rerender(matchesParams({ term: "claude", scopeKey: "tasks::/logs" }));
     expect(result.current.matches).toBeUndefined();
     expect(result.current.settled).toBe(false);
     await waitFor(() => expect(result.current.settled).toBe(true));
