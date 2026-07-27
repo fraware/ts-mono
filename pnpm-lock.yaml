@@ -311,8 +311,8 @@ importers:
         specifier: ^36.0.1
         version: 36.0.1
       ag-grid-react:
-        specifier: ^36.0.0
-        version: 36.0.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        specifier: ^36.0.1
+        version: 36.0.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       arquero:
         specifier: ^8.0.3
         version: 8.0.3
@@ -3041,26 +3041,17 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  ag-charts-types@14.0.0:
-    resolution: {integrity: sha512-89X4J/OeOTzTp505126JayGEn3k6QUKz3UHSR0/ggoVZYzVqtMN13k/B136S1+YBwgnzyJ/NARnnIRTPWsWG9g==}
-
   ag-charts-types@14.0.1:
     resolution: {integrity: sha512-fGNDptlNzaQDqDoZxAYeLtBrV8sIXE1iRXX9s5W+/drobP3Ig2fhdAOlKp3IIrHlbiKZUiuhraqT0D4IYVyM4w==}
-
-  ag-grid-community@36.0.0:
-    resolution: {integrity: sha512-73PeuoG1Pofi6o1o2dYd092m5AdCt0uq/iCaVTCxLw9eRJGLZu0I+HICReolUmUH7A5X+CnYDXiE+P9S8dUqCQ==}
 
   ag-grid-community@36.0.1:
     resolution: {integrity: sha512-wQetUqoY6SBCtKzDjsYkImiGpM4+hU7S5/NvxcCAO6liL6mSRXlEvCHdQZUfj6amuhsdjVlGK1C8e+B54EyDTQ==}
 
-  ag-grid-react@36.0.0:
-    resolution: {integrity: sha512-ShmynyRQDoxuXBso+kPliZJnivQKwBG/EGclCBV3dg98ou2kq7yxdgf8DhrW4uM5SekNDaqor4Gn9OAGtH2o3g==}
+  ag-grid-react@36.0.1:
+    resolution: {integrity: sha512-cqyZWHks9LF7MBZvX6QP8IGlYBScssdQ3B6EMli0nO2TClbBiRTZuP1ja3AwVL0THnl+WksO2kBB2ATWp8vVAQ==}
     peerDependencies:
       react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
       react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
-
-  ag-stack@36.0.0:
-    resolution: {integrity: sha512-ciXqjZygVLk3tnZWOAQyOxP48Ju2ZmaSAtIebekXJwHqA7vB+NJ8ZME/O4XTRpInTSHn2KSu/KTxgWJO8dduiw==}
 
   ag-stack@36.0.1:
     resolution: {integrity: sha512-FsrO55fl7EDToQVgRDaTF1+QKWpfJK1nxTxTavkkfHeq6Kei4skAeP0MsjXm7zECjfyHczlwmWvp+KN7KHnlYQ==}
@@ -7514,28 +7505,19 @@ snapshots:
 
   acorn@8.17.0: {}
 
-  ag-charts-types@14.0.0: {}
-
   ag-charts-types@14.0.1: {}
-
-  ag-grid-community@36.0.0:
-    dependencies:
-      ag-charts-types: 14.0.0
-      ag-stack: 36.0.0
 
   ag-grid-community@36.0.1:
     dependencies:
       ag-charts-types: 14.0.1
       ag-stack: 36.0.1
 
-  ag-grid-react@36.0.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
+  ag-grid-react@36.0.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
     dependencies:
-      ag-grid-community: 36.0.0
+      ag-grid-community: 36.0.1
       prop-types: 15.8.1
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
-
-  ag-stack@36.0.0: {}
 
   ag-stack@36.0.1: {}
 
