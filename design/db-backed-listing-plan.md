@@ -530,12 +530,10 @@ and the warm banner's swallowed error text.)
   with the Find band's snapshot-ordered match targets. Correct fix is
   positioning overlays against snapshot order — couples into the
   range-driven rework above, so it waits for it.
-- **Database→cache source flip mid-pagination**: `readLogsListingPage`'s
-  cache fallback ignores `page.cursor` and the query key carries no source
-  slot, so a mid-session scope degrade appends the full listing after the
-  loaded pages (duplicate row ids) until the next invalidation refetch
-  prunes it. Narrow window, self-heals in ~1s; clean fix is a source slot
-  in the listing key (or resetting pages on flip).
+- ~~**Database→cache source flip mid-pagination**~~: fixed on the branch
+  after all (2026-07-27 review pass) — both row sources now share one
+  cursor encoding (`pageBounds`), so the cache fallback honors the page
+  contract instead of appending the full listing after the loaded pages.
 - **Invalidation throttle vs. refetch-cycle duration**: the 1s trailing
   throttle is tuned to a 20k-dir refetch cycle (see the comment at the
   throttle); a dir whose cycle exceeds it re-triggers the
@@ -554,8 +552,10 @@ and the warm banner's swallowed error text.)
   commit-chaining fix, no layout guard). Hoist one near-end trigger (and
   the coupled pageSize/threshold config) into a shared package both grids
   consume.
-- **Snapshot-path cursor arithmetic duplicates `pageRows`**: the offset
-  decode and `next_cursor` formula in `readLogsListingPage` mirror
-  `client/database/listing.ts`'s `pageRows`; partial fit (the snapshot path
-  pages keys, not rows), so fold together only if a cursor-shape change
-  ever forces both to move.
+- **`pageBounds` cursor arithmetic duplicates `pageRows`**: the offset
+  decode and `next_cursor` formula in `logsListingRead.ts`'s `pageBounds`
+  (both of the seam's row sources page through it) mirror
+  `client/database/listing.ts`'s `pageRows` (the in-memory engine's);
+  partial fit (`pageBounds` is bidirectional and slices a total, not an
+  array), so fold together only if a cursor-shape change ever forces both
+  to move.
