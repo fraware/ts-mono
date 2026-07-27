@@ -151,15 +151,19 @@ export const useLogListColumns = (
         header: "Task",
         size: 250,
         minSize: 150,
+        // Parse the basename: tasks-mode row names are relative paths,
+        // which the (anchored) file-name pattern rejects — and the data
+        // layer's schema parses basenames, so filter/sort must agree with
+        // what displays here.
         accessorFn: (row) => {
           if (row.type === "file") {
-            return row.task || parseLogFileName(row.name).name;
+            return row.task || parseLogFileName(basename(row.name)).name;
           }
           return row.name;
         },
         titleValue: (row) => {
           if (row.type === "file") {
-            return row.task || parseLogFileName(row.name).name;
+            return row.task || parseLogFileName(basename(row.name)).name;
           }
           return row.name;
         },
@@ -167,7 +171,7 @@ export const useLogListColumns = (
           const item = row.original;
           let value = item.name;
           if (item.type === "file") {
-            value = item.task || parseLogFileName(item.name).name;
+            value = item.task || parseLogFileName(basename(item.name)).name;
           }
           const href = item.url
             ? `${window.location.pathname}#${item.url}`
