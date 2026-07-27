@@ -5,14 +5,10 @@ import type { FilterType } from "@tsmono/inspect-components/columnFilter";
 import { basename, formatNumber, formatPrettyDecimal } from "@tsmono/util";
 
 import { useLogDir } from "../../../../app_config";
-import { scopePrefix } from "../../../../client/database";
 import { kModelNone } from "../../../../constants";
 import {
   createLogColumnSchema,
-  useLogListing,
-  useScoreSchema,
   type LogColumnSchema,
-  type LogListingRow,
   type ScorerMap,
   type ValueComparator,
 } from "../../../../log_data";
@@ -23,6 +19,7 @@ import { ApplicationIcons } from "../../../appearance/icons";
 import { ExtendedColumnDef } from "../../../shared/data-grid/columnTypes";
 import sharedStyles from "../../../shared/gridCells.module.css";
 import { type PickerColumn } from "../../../shared/gridUtils";
+import { useLogColumnFacts } from "../../useLogColumnFacts";
 
 import localStyles from "./columns.module.css";
 import { completedAtValue } from "./completedAt";
@@ -35,7 +32,6 @@ type LogListColumn = ExtendedColumnDef<LogListRow>;
 const EmptyCell = () => <div>-</div>;
 
 const kNoScorerMap: ScorerMap = {};
-const kNoListingRows: LogListingRow[] = [];
 
 const displayModelRoles = (row: LogListRow | undefined): [string, string][] => {
   if (!row) return [];
@@ -114,10 +110,11 @@ export const useLogListColumns = (
     (state) => state.logsActions.setLogsColumnVisibility
   );
   const logDir = useLogDir();
-  // Settled schema only: column defs are decorative config — while the
-  // listing loads there are simply no scorer columns yet, and listing errors
+  // Settled facts only: column defs are decorative config — while the
+  // facts load there are simply no scorer columns yet, and listing errors
   // render in LogsPanel's error surface.
-  const scorerMap = useScoreSchema(logDir, scopeDir).data ?? kNoScorerMap;
+  const columnFacts = useLogColumnFacts(logDir, scopeDir).data;
+  const scorerMap = columnFacts?.scorerMap ?? kNoScorerMap;
   const schema = useMemo(() => createLogColumnSchema(scorerMap), [scorerMap]);
 
   const allColumns = useMemo((): LogListColumn[] => {
@@ -752,15 +749,7 @@ export const useLogListColumns = (
 
   // Auto-promote `sampleLimits` to default-visible when any in-scope log
   // has a sample that ended with a limit (an ingestion-derived header fact).
-  const listingRows = useLogListing(logDir).data ?? kNoListingRows;
-  const hasSampleLimits = useMemo(() => {
-    const prefix = scopeDir ? scopePrefix(scopeDir) : undefined;
-    return listingRows.some(
-      (row) =>
-        (!prefix || row.name.startsWith(prefix)) &&
-        (row.header?.sampleLimits.length ?? 0) > 0
-    );
-  }, [listingRows, scopeDir]);
+  const hasSampleLimits = columnFacts?.hasSampleLimits ?? false;
 
   // Default hidden columns per mode
   const defaultHiddenFields = useMemo(() => {

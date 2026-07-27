@@ -45,12 +45,12 @@ vi.mock("../../../../state/store", () => ({
     }),
 }));
 
-// Real barrel (the schema under test lives there); only the async hooks the
-// column hook reads are stubbed.
-vi.mock("../../../../log_data", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../log_data")>()),
-  useScoreSchema: () => ({ data: scorerMap, loading: false }),
-  useLogListing: () => ({ data: [], loading: false }),
+// The one async hook the column hook reads, stubbed with settled facts.
+vi.mock("../../useLogColumnFacts", () => ({
+  useLogColumnFacts: () => ({
+    data: { scorerMap, hasSampleLimits: false },
+    loading: false,
+  }),
 }));
 
 const baseRecord = {
