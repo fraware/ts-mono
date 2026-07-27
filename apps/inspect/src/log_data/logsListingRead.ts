@@ -15,7 +15,10 @@ import type {
 import { directoryRelativeUrl, rootName } from "../utils/uri";
 
 import { getDatabaseService } from "./databaseServiceInstance";
-import type { LogColumnSchema } from "./listing/logColumnSchema";
+import {
+  parentDirCondition,
+  type LogColumnSchema,
+} from "./listing/logColumnSchema";
 import { createListingPlan } from "./listing/planner";
 import { joinSearchText } from "./listing/searchText";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
@@ -357,16 +360,25 @@ const deriveFolders = (
  */
 export const readLogsOverview = async (
   logDir: string,
+  schema: LogColumnSchema,
   options: LogsOverviewOptions
 ): Promise<LogsOverview> => {
   const scanned = await scanRows(logDir, { prefix: logDir });
   const rows = computeLogsWithRetried(scanned);
 
-  // The listing's directory membership (`parent_dir = folderDir`): file
-  // facts count what the listing lists; the tasks view lists the whole dir.
-  const isCandidate = (log: LogListingRow): boolean =>
-    options.folderDir === undefined ||
-    isInDirectory(log.name, options.folderDir);
+  // Directory membership exactly as the listing evaluates it — the same
+  // `parent_dir` condition through the same schema — so file facts count
+  // the universe the grid renders rather than a second, hand-maintained
+  // reading of it (the tasks view lists the whole dir).
+  const isCandidate =
+    options.folderDir === undefined
+      ? () => true
+      : createListingPlan({
+          filter: parentDirCondition(options.folderDir),
+          getValue: schema.getValue,
+          getComparator: schema.getComparator,
+          getFilterType: schema.getFilterType,
+        }).matches;
 
   const taskIds = new Set<string>();
   let fileCount = 0;
@@ -376,6 +388,9 @@ export const readLogsOverview = async (
   for (const log of rows) {
     if (log.task_id) taskIds.add(log.task_id);
     if (!isCandidate(log)) continue;
+    // Deliberately not the listing's `retried = false` condition: the
+    // overview reports both sides of it in one pass (`retriedCount` counts
+    // exactly what retried-hiding removes).
     if (log.retried) {
       retriedCount += 1;
       if (!options.showRetriedLogs) continue;
@@ -696,6 +711,6 @@ export const createLogsListingData = (
   return {
     getPage,
     getMatches,
-    getOverview: (options) => readLogsOverview(logDir, options),
+    getOverview: (options) => readLogsOverview(logDir, schema, options),
   };
 };

@@ -755,7 +755,7 @@ describe("readLogsOverview", () => {
       "/test/logs/sub/d.json": preview({ task_id: "t-d" }),
     });
 
-    const overview = await readLogsOverview("/test/logs", {
+    const overview = await readLogsOverview("/test/logs", schema, {
       folderDir: "/test/logs",
       showRetriedLogs: false,
     });
@@ -778,7 +778,7 @@ describe("readLogsOverview", () => {
       "/test/logs/sub2/e.json": preview({ task_id: "t-e" }),
     });
 
-    const overview = await readLogsOverview("/test/logs", {
+    const overview = await readLogsOverview("/test/logs", schema, {
       folderDir: "/test/logs",
       showRetriedLogs: false,
     });
@@ -794,6 +794,23 @@ describe("readLogsOverview", () => {
     ]);
   });
 
+  test("a slash-terminated folderDir counts the same membership", async () => {
+    // Membership runs through parentDirCondition, whose normalization must
+    // keep the trailing-slash tolerance isInDirectory used to provide.
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task_id: "t-a" }),
+      "/test/logs/sub/b.json": preview({ task_id: "t-b" }),
+    });
+
+    const overview = await readLogsOverview("/test/logs", schema, {
+      folderDir: "/test/logs/",
+      showRetriedLogs: false,
+    });
+
+    expect(overview.fileCount).toBe(1);
+    expect(overview.soleFileName).toBe("/test/logs/a.json");
+  });
+
   test("counts retried runs and applies retried-hiding to file facts", async () => {
     await databaseService.writeLogPreviews({
       "/test/logs/2024-01-01_task.json": preview({ task_id: "shared" }),
@@ -804,13 +821,13 @@ describe("readLogsOverview", () => {
       showRetriedLogs: false,
     };
 
-    const hidden = await readLogsOverview("/test/logs", options);
+    const hidden = await readLogsOverview("/test/logs", schema, options);
     expect(hidden.fileCount).toBe(1);
     expect(hidden.retriedCount).toBe(1);
     expect(hidden.soleFileName).toBe("/test/logs/2024-01-02_task.json");
     expect(hidden.folders).toEqual([]);
 
-    const shown = await readLogsOverview("/test/logs", {
+    const shown = await readLogsOverview("/test/logs", schema, {
       ...options,
       showRetriedLogs: true,
     });
