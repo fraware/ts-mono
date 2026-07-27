@@ -1,7 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
 
 import { createLogsSlice } from "./logsSlice";
-import { StoreState } from "./store";
+import {
+  migratePersistedState,
+  StoreState,
+  type PersistedState,
+} from "./store";
 
 const createHarness = () => {
   const state = {} as StoreState;
@@ -66,6 +70,56 @@ describe("logsSlice.patchLogsGridState", () => {
     expect(state.logs.listing.gridStateByScope["logs::/b"]?.selectedRowId).toBe(
       "row-2"
     );
+  });
+});
+
+describe("migratePersistedState", () => {
+  const filter = (columnId: string, value: string) => ({
+    columnId,
+    filterType: "string" as const,
+    spec: { operator: "=" as const, value },
+  });
+
+  test("v4 → v5 drops persisted path filters in every scope, keeping the rest", () => {
+    // v5 changed the Path column's value from the view-relative name to the
+    // record's full path: an old-form path filter can never match again.
+    const persisted = {
+      logs: {
+        listing: {
+          columnVisibility: {},
+          gridStateByScope: {
+            "logs::/a": {
+              sorting: [{ id: "completedAt", desc: true }],
+              columnFilters: {
+                path: filter("path", "2024_task.eval"),
+                model: filter("model", "gpt-4"),
+              },
+            },
+            "tasks::/a": {
+              sorting: [],
+              columnFilters: { path: filter("path", "sub/2024_task.eval") },
+            },
+            "logs::/b": { sorting: [] },
+          },
+        },
+      },
+    } as unknown as PersistedState;
+
+    const migrated = migratePersistedState(persisted, 4);
+
+    const byScope = migrated?.logs.listing.gridStateByScope ?? {};
+    expect(byScope["logs::/a"]?.columnFilters).toEqual({
+      model: filter("model", "gpt-4"),
+    });
+    expect(byScope["logs::/a"]?.sorting).toEqual([
+      { id: "completedAt", desc: true },
+    ]);
+    expect(byScope["tasks::/a"]?.columnFilters).toEqual({});
+    expect(byScope["logs::/b"]).toEqual({ sorting: [] });
+  });
+
+  test("pre-v4 states are discarded, like the no-migrate mismatch before them", () => {
+    expect(migratePersistedState({ logs: {} }, 3)).toBeUndefined();
   });
 });
 
