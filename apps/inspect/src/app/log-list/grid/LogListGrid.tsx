@@ -27,7 +27,6 @@ import { DataGrid } from "../../shared/data-grid/DataGrid";
 import {
   buildSearchIndex,
   findMatches,
-  rowSearchText,
 } from "../../shared/data-grid/findMatches";
 import gridStyles from "../../shared/gridCells.module.css";
 import {
@@ -80,10 +79,11 @@ interface LogListGridProps {
    *  match query against the same universe (so matches cover rows beyond
    *  the loaded page once the listing paginates). */
   listing: LogsListingDescriptor<LogListingRow>;
-  /** Shape a queried record into its display row (the same function
-   *  `useLogListData` shapes pages with) — the find band's match text and
-   *  ids are display-level, but the match scan runs over records. */
-  shapeRow: (log: LogListingRow) => LogListRow | undefined;
+  /** The display row id for a record key (pure path logic — see
+   *  `fileLogIdentity`): match results identify records by key, and the
+   *  find band steers selection by display row id, including for matches
+   *  on rows that aren't loaded yet. */
+  rowIdForName: (name: string) => string;
   /** More file rows exist beyond the loaded pages (from `useLogListData`). */
   hasMoreRows: boolean;
   /** Load the next page of file rows (in-flight-safe). */
@@ -106,7 +106,7 @@ export const LogListGrid: FC<LogListGridProps> = ({
   mode = "logs",
   busy,
   listing,
-  shapeRow,
+  rowIdForName,
   hasMoreRows,
   fetchMoreRows,
   ensureFileOffsetLoaded,
@@ -224,27 +224,17 @@ export const LogListGrid: FC<LogListGridProps> = ({
     () => columns.filter((col) => col.id !== undefined && visibility[col.id]),
     [columns, visibility]
   );
-  const searchKey = useMemo(
+  const searchColumnIds = useMemo(
     () => searchColumns.map((col) => col.id ?? ""),
     [searchColumns]
-  );
-  // The match scan runs over stored records; searchable text and match ids
-  // are display-level, so shape per record here (above the data interface).
-  const rowText = useCallback(
-    (log: LogListingRow) => {
-      const row = shapeRow(log);
-      return row === undefined ? "" : rowSearchText(row, searchColumns);
-    },
-    [shapeRow, searchColumns]
-  );
-  const getRowId = useCallback(
-    (log: LogListingRow) => shapeRow(log)?.id ?? log.name,
-    [shapeRow]
   );
 
   // Match membership is data-level, computed against the listing source
   // under the same universe + filter + sort as the rows — so matches keep
-  // covering rows outside the loaded page once the listing paginates.
+  // covering rows outside the loaded page once the listing paginates. The
+  // visible column ids are the whole find-specific input: matching runs
+  // over the data layer's per-column search text (which mirrors these
+  // columns' display formatting), and match ids come back as record keys.
   const fileMatches = useLogsListingMatches({
     filter,
     orderBy,
@@ -252,9 +242,7 @@ export const LogListGrid: FC<LogListGridProps> = ({
     listing,
     term: findTerm,
     enabled: showFind,
-    getRowId,
-    rowText,
-    searchKey,
+    searchColumns: searchColumnIds,
   });
   const { reset: resetMatches } = fileMatches;
 
@@ -289,11 +277,16 @@ export const LogListGrid: FC<LogListGridProps> = ({
 
     // Folders are pinned above the file universe. Files use the snapshot's
     // complete ordering, loaded or not; transient pending matches merge by
-    // the same controlled sort values as the rendered rows.
+    // the same controlled sort values as the rendered rows. File matches
+    // identify records by key; selection steers by display row id, so
+    // translate here (a pure derivation — the matched row may not be
+    // loaded).
     rows
       .filter((row) => row.type === "folder" && overlayMatches.has(row.id))
       .forEach((row) => add(folders, { id: row.id, row }));
-    fileMatches.matches?.forEach((match) => add(files, match));
+    fileMatches.matches?.forEach((match) =>
+      add(files, { ...match, id: rowIdForName(match.id) })
+    );
     rows
       .filter(
         (row) => row.type === "pending-task" && overlayMatches.has(row.id)
@@ -317,6 +310,7 @@ export const LogListGrid: FC<LogListGridProps> = ({
     fileMatches.matches,
     overlayIndex,
     rows,
+    rowIdForName,
     orderBy,
     getValue,
     getComparator,

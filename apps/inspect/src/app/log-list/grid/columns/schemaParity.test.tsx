@@ -13,6 +13,7 @@ import { renderHook } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 
 import type { LogListingRow, ScorerMap } from "../../../../log_data";
+import { primitiveText } from "../../../shared/data-grid/findMatches";
 import { fileLogItem, type FileLogItemView } from "../../fileLogItem";
 import { buildLogListRow } from "../logListRow";
 
@@ -146,5 +147,25 @@ describe("column schema / grid accessor parity", () => {
       columnIds.map((id) => [id, getValue(shaped, id)])
     );
     expect(fromSchema).toEqual(fromGrid);
+
+    // Search text too: the find band matches records below the interface
+    // via schema.getSearchText, while loaded overlay rows match above via
+    // the column defs' textValue (rowSearchText's per-column rule) — the
+    // two must produce the same text per column.
+    const searchFromSchema = Object.fromEntries(
+      columnIds.map((id) => [id, schema.getSearchText(log, id)])
+    );
+    const searchFromGrid = Object.fromEntries(
+      columnIds.map((id) => {
+        const column = columns.find((col) => col.id === id)!;
+        return [
+          id,
+          column.textValue
+            ? column.textValue(shaped)
+            : primitiveText(getValue(shaped, id)),
+        ];
+      })
+    );
+    expect(searchFromSchema).toEqual(searchFromGrid);
   });
 });

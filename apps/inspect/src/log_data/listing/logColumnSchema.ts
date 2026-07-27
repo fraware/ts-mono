@@ -1,8 +1,9 @@
 import type { FilterType } from "@tsmono/inspect-components/columnFilter";
-import { basename, dirname } from "@tsmono/util";
+import { basename, dirname, formatPrettyDecimal } from "@tsmono/util";
 
 import { kModelNone } from "../../constants";
 import { parseLogFileName } from "../../utils/evallog";
+import { formatTime } from "../../utils/format";
 import type { LogListingRow } from "../logListing";
 import type { ScorerMap } from "../scoreSchema";
 
@@ -26,11 +27,41 @@ export interface LogColumnSchema {
   getComparator: (columnId: string) => ValueComparator | undefined;
   /** Per-column filter type (type-aware filter coercion and editors). */
   getFilterType: (columnId: string) => FilterType | undefined;
+  /** A record's *searchable* text for a column — the same formatted text
+   *  the grid displays and searches (`textValue`-formatted where the
+   *  column formats; the raw primitive value otherwise; `null` when the
+   *  column contributes no text). Lets the find band's matching run below
+   *  the interface from column ids alone, with no view closure. */
+  getSearchText: (log: LogListingRow, columnId: string) => string | null;
   /** Cache identity: the scorer schema the dynamic score/metric columns
    *  derive from (it arrives asynchronously — queries evaluated through
    *  the schema must carry this in their keys). */
   key: string;
 }
+
+/** Objects/arrays are skipped rather than stringified ("[object Object]"
+ *  must never be searchable text) — `rowSearchText`'s rule, mirrored here
+ *  so record-level search text matches the grid's shaped-row text (the
+ *  parity test compares them per column). */
+const primitiveText = (value: unknown): string | null => {
+  switch (typeof value) {
+    case "string":
+      return value;
+    case "number":
+    case "boolean":
+    case "bigint":
+      return String(value);
+    default:
+      return null;
+  }
+};
+
+/** A score/metric cell's display text (the grid's score `textValue`). */
+const scoreText = (value: unknown): string | null => {
+  if (typeof value === "number") return formatPrettyDecimal(value);
+  if (typeof value === "boolean") return String(value);
+  return typeof value === "string" && value !== "" ? value : null;
+};
 
 /** Missing values (null/undefined/""/NaN) compare as smallest — first
  *  ascending, last descending once the listing query negates for DESC —
@@ -84,6 +115,10 @@ interface ColumnSemantics {
   getValue: (log: LogListingRow) => unknown;
   comparator?: ValueComparator;
   filterType?: FilterType;
+  /** Display-formatted search text, for columns whose cells format their
+   *  value (the grid's `textValue`). Default: the raw value's primitive
+   *  text. */
+  searchText?: (log: LogListingRow) => string | null;
 }
 
 /** The static columns. Values mirror `buildLogListRow`'s projection (both
@@ -98,6 +133,10 @@ const kStaticColumns: Record<string, ColumnSemantics | undefined> = {
     getValue: (log) => log.primary_metric?.value,
     comparator: numberCompare,
     filterType: "number",
+    searchText: (log) => {
+      const value = log.primary_metric?.value;
+      return value === undefined ? null : formatPrettyDecimal(value);
+    },
   },
   status: { getValue: (log) => log.status },
   completedAt: {
@@ -127,6 +166,10 @@ const kStaticColumns: Record<string, ColumnSemantics | undefined> = {
     getValue: (log) => log.derived?.duration,
     comparator: numberCompare,
     filterType: "number",
+    searchText: (log) => {
+      const value = log.derived?.duration;
+      return value === undefined ? null : formatTime(value);
+    },
   },
   taskFile: { getValue: (log) => log.header?.eval?.task_file ?? undefined },
   taskArgs: { getValue: (log) => log.derived?.task_args },
@@ -140,6 +183,10 @@ const kStaticColumns: Record<string, ColumnSemantics | undefined> = {
     getValue: (log) => log.derived?.percent_completed,
     comparator: numberCompare,
     filterType: "number",
+    searchText: (log) => {
+      const value = log.derived?.percent_completed;
+      return value === undefined ? null : `${formatPrettyDecimal(value)}%`;
+    },
   },
   sampleErrors: {
     getValue: (log) => log.header?.sampleErrorCount,
@@ -210,28 +257,33 @@ export const createLogColumnSchema = (
       const scorerName = key.slice(0, slash);
       const metricName = key.slice(slash + 1);
       const numeric = scorerMap[key]?.valueType === "number";
+      const getValue = (log: LogListingRow): unknown =>
+        scoreValue(log, scorerName, metricName);
       return {
-        getValue: (log) => scoreValue(log, scorerName, metricName),
+        getValue,
         comparator: numeric ? numberCompare : undefined,
         filterType: numeric ? "number" : undefined,
+        searchText: (log) => scoreText(getValue(log)),
       };
     }
     if (columnId.startsWith(kMetricPrefix)) {
       const metricName = columnId.slice(kMetricPrefix.length);
       const group = metricScorers.get(metricName);
       if (group === undefined) return undefined;
-      return {
-        getValue: (log) => {
-          for (const scorer of group.scorers) {
-            const value = scoreValue(log, scorer, metricName);
-            if (value !== undefined && value !== null && value !== "") {
-              return value;
-            }
+      const getValue = (log: LogListingRow): unknown => {
+        for (const scorer of group.scorers) {
+          const value = scoreValue(log, scorer, metricName);
+          if (value !== undefined && value !== null && value !== "") {
+            return value;
           }
-          return undefined;
-        },
+        }
+        return undefined;
+      };
+      return {
+        getValue,
         comparator: group.allNumeric ? numberCompare : undefined,
         filterType: group.allNumeric ? "number" : undefined,
+        searchText: (log) => scoreText(getValue(log)),
       };
     }
     return undefined;
@@ -250,6 +302,17 @@ export const createLogColumnSchema = (
     },
     getComparator: (columnId) => resolve(columnId)?.comparator,
     getFilterType: (columnId) => resolve(columnId)?.filterType ?? "string",
+    getSearchText: (log, columnId) => {
+      const column = resolve(columnId);
+      if (column === undefined) {
+        return primitiveText(
+          (log as unknown as Record<string, unknown>)[columnId]
+        );
+      }
+      return column.searchText
+        ? column.searchText(log)
+        : primitiveText(column.getValue(log));
+    },
     key: Object.entries(scorerMap)
       .map(([key, { valueType }]) => `${key}:${valueType}`)
       .sort()

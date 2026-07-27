@@ -152,12 +152,19 @@ export const LogsPanel: FC<LogsPanelProps> = ({
   } = useLogListColumns(mode, scopeDir, scoresViewMode);
 
   // Shape a queried record into its display row — applied per loaded page
-  // above the data interface (in useLogListData and the grid's find band).
+  // above the data interface (in useLogListData).
   const shapeRow = useCallback(
     (log: LogListingRow) => {
       const item = fileLogItem(log, itemView);
       return item === undefined ? undefined : buildLogListRow(item);
     },
+    [itemView]
+  );
+
+  // The display row id for a record key — the find band's matches identify
+  // records by key (possibly unloaded rows), and selection steers by row id.
+  const rowIdForName = useCallback(
+    (name: string) => fileLogIdentity(name, itemView)?.id ?? name,
     [itemView]
   );
 
@@ -425,7 +432,7 @@ export const LogsPanel: FC<LogsPanelProps> = ({
                 mode={mode}
                 busy={listBusy}
                 listing={listing}
-                shapeRow={shapeRow}
+                rowIdForName={rowIdForName}
                 hasMoreRows={listData.hasMoreRows}
                 fetchMoreRows={listData.fetchMoreRows}
                 ensureFileOffsetLoaded={listData.ensureFileOffsetLoaded}

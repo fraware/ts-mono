@@ -252,14 +252,18 @@ unloaded match's position. Pulling matches inside the implementation would
 force that UI state down with it. So it's a query method — conceptually
 `getPage` with a different projection (positions instead of rows).
 
-One honest wart in `getMatches`: it cannot be expressed as a filter
-condition, because matching runs against a row's *on-screen text* — the
-formatted cell values of the currently visible columns (a formatted date,
-a model's display name) — which stored fields can't reproduce. So the
-function that produces a row's searchable text is view code that crosses
-the interface, transitionally, the same way the view-level column
-accessors do (see "Two kinds of column names"). It shares their exit
-path.
+One honest wart in `getMatches`, as designed: it cannot be expressed as a
+filter condition, because matching runs against a row's *on-screen text* —
+the formatted cell values of the currently visible columns (a formatted
+date, a model's display name) — which stored fields can't reproduce. So
+the function that produces a row's searchable text was expected to be
+view code crossing the interface, transitionally. *Resolved:* the column
+schema now carries per-column *search text* (the same display formatting
+the grid's `textValue` applies — the parity test pins the two together),
+so `getMatches` takes only data: the visible column ids and the term.
+Match ids likewise became record keys, with the view deriving display row
+ids from them (`fileLogIdentity` is a pure function of the name). Nothing
+crossing the interface is a function anymore.
 
 Why `getOverview` is a separate method rather than a `getPage` variant:
 its numbers deliberately span *different* membership rules in one answer —
@@ -445,11 +449,12 @@ the scorer map, never pre-expanded). Evaluation therefore never touches
 shaped rows or view accessors at all: the instance is constructed from
 just `(logDir, schema)`, per-call accessors never happened, and the
 "resolver" is simply the schema's own resolution (membership columns,
-declared data columns, raw-field fallback for unknown ids). What still
-crosses the interface as functions is exactly `getMatches`' pair —
-`rowText` (formatted on-screen text) and `getRowId` (view row identity) —
-the acknowledged wart above, now the *only* serialization blocker on a
-server-backed implementation.
+declared data columns, raw-field fallback for unknown ids). The last
+residue — `getMatches`' `rowText`/`getRowId` closures — fell in a
+follow-up: the schema carries per-column search text and matches identify
+records by key (see the `getMatches` section). Every interface input is
+now data; no serialization blocker remains on a server-backed
+implementation.
 
 ## What we are deliberately not doing yet
 

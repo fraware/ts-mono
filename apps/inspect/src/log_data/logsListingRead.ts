@@ -374,6 +374,8 @@ export const readLogsOverview = async (
 };
 
 export interface LogsListingMatch {
+  /** The matched record's key (`file_path`) — the view derives its display
+   *  row id from it (`fileLogIdentity` is a pure function of the name). */
   id: string;
   /** Zero-based position in the filtered + sorted snapshot key list. */
   offset: number;
@@ -381,20 +383,18 @@ export interface LogsListingMatch {
   orderValues?: Record<string, unknown>;
 }
 
-/** The find-only query inputs of {@link LogsListingData.getMatches}. The
- *  two functions are view code crossing the interface transitionally:
- *  matching runs against formatted on-screen text, and match ids are the
- *  view's row ids — neither is expressible over stored fields yet
- *  (design/listing-data-interface.md, `getMatches`). */
-export interface LogsListingFindQuery<TRow> {
+/** The find-only query inputs of {@link LogsListingData.getMatches} — all
+ *  data, no view closures: matching runs against the schema's per-column
+ *  search text, which mirrors the grid's display formatting (the parity
+ *  test pins the two together). */
+export interface LogsListingFindQuery {
   /** Sizes the snapshot build's inline first page when the match query is
    *  the one that builds it. */
   pageSize: number;
   term: string;
-  getRowId: (row: TRow) => string;
-  /** A row's searchable text, already lowercased (`rowSearchText`'s
-   *  contract) — the scan must not pay a second per-row lowering. */
-  rowText: (row: TRow) => string;
+  /** The column ids whose text is searched — the view's visible columns,
+   *  so matches agree with what the user sees on loaded rows. */
+  searchColumns: readonly string[];
 }
 
 /**
@@ -450,7 +450,7 @@ export interface LogsListingData<TRow> {
   getMatches(
     filter: Condition | undefined,
     orderBy: OrderByModel[] | undefined,
-    find: LogsListingFindQuery<TRow>
+    find: LogsListingFindQuery
   ): Promise<LogsListingMatch[]>;
 
   /**
@@ -609,18 +609,26 @@ export const createLogsListingData = (
   const getMatches = async (
     filter: Condition | undefined,
     orderBy: OrderByModel[] | undefined,
-    find: LogsListingFindQuery<LogListingRow>
+    find: LogsListingFindQuery
   ): Promise<LogsListingMatch[]> => {
     const plan = compilePlan(filter, orderBy);
     const scope = scanScopeFromFilter(logDir, filter);
     const term = find.term.toLowerCase();
+    // Newline separator, like the grid's `rowSearchText`: it never matches
+    // a typed term, so a term can't match across adjacent columns' text.
+    const rowText = (log: LogListingRow): string =>
+      find.searchColumns
+        .map((columnId) => schema.getSearchText(log, columnId))
+        .filter((text): text is string => text !== null && text !== "")
+        .join("\n")
+        .toLowerCase();
     const toMatch = (log: LogListingRow, offset: number): LogsListingMatch => {
       const orderValues = orderBy?.length
         ? Object.fromEntries(
             orderBy.map(({ column }) => [column, schema.getValue(log, column)])
           )
         : undefined;
-      const match = { id: find.getRowId(log), offset };
+      const match = { id: log.name, offset };
       return orderValues === undefined ? match : { ...match, orderValues };
     };
 
@@ -629,7 +637,7 @@ export const createLogsListingData = (
       const matches: LogsListingMatch[] = [];
       for (let offset = 0; offset < records.length; offset++) {
         const log = records[offset]!;
-        if (find.rowText(log).includes(term)) {
+        if (rowText(log).includes(term)) {
           matches.push(toMatch(log, offset));
         }
       }
@@ -652,7 +660,7 @@ export const createLogsListingData = (
     const matches: LogsListingMatch[] = [];
     for (const log of records) {
       const offset = offsetByKey.get(log.name);
-      if (offset !== undefined && find.rowText(log).includes(term)) {
+      if (offset !== undefined && rowText(log).includes(term)) {
         matches.push(toMatch(log, offset));
       }
     }

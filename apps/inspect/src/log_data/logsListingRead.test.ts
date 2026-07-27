@@ -806,8 +806,7 @@ describe("LogsListingData.getMatches", () => {
     const pending = createData().getMatches(undefined, undefined, {
       pageSize: 2,
       term: "alpha",
-      getRowId: (row) => row.name,
-      rowText: (row) => `${row.name}\n${row.task ?? ""}`.toLowerCase(),
+      searchColumns: ["name", "task"],
     });
 
     // Both reads must be in flight before either resolves.
@@ -840,10 +839,9 @@ describe("LogsListingData.getMatches", () => {
     const orderBy = [{ column: "name", direction: "DESC" as const }];
     const matches = await createData().getMatches(filter, orderBy, {
       pageSize: 2,
-      // Lowercased per rowText's contract; the term may be any case.
+      // Matching is case-insensitive over the schema's search text.
       term: "ALPHA",
-      getRowId: (row) => row.name,
-      rowText: (row) => `${row.name}\n${row.task ?? ""}`.toLowerCase(),
+      searchColumns: ["name", "task"],
     });
 
     expect(matches).toEqual([
@@ -882,8 +880,7 @@ describe("LogsListingData.getMatches", () => {
     const matches = await data.getMatches(undefined, orderBy, {
       pageSize: 1,
       term: "match",
-      getRowId: (row) => row.name,
-      rowText: (row) => row.task ?? "",
+      searchColumns: ["task"],
     });
     expect(matches).toEqual([
       {

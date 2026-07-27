@@ -1,8 +1,10 @@
 import type { ExtendedColumnDef } from "./columnTypes";
 
 /** Objects/arrays are skipped rather than stringified ("[object Object]"
- *  must never be searchable text). */
-function primitiveText(value: unknown): string | null {
+ *  must never be searchable text). Exported for the schema parity test,
+ *  which pins the data layer's per-column search text to this module's
+ *  per-column text rule. */
+export function primitiveText(value: unknown): string | null {
   switch (typeof value) {
     case "string":
       return value;

@@ -337,11 +337,10 @@ interface UseLogsListingMatchesParams<TRow> {
   term: string;
   /** Whether the find band is open — the query never runs while closed. */
   enabled: boolean;
-  getRowId: (row: TRow) => string;
-  /** A row's searchable text, already lowercased (see `rowSearchText`). */
-  rowText: (row: TRow) => string;
-  /** Cache identity of `rowText` — the searchable (visible) column ids. */
-  searchKey: readonly string[];
+  /** The searchable (visible) column ids — matching runs over the data
+   *  layer's per-column search text for these, so no view closure crosses
+   *  the interface. Also the query key's find-scope slot. */
+  searchColumns: readonly string[];
 }
 
 export interface LogsListingMatches {
@@ -359,10 +358,8 @@ export interface LogsListingMatches {
  * The find band's data-level match query, beside the row query so the two
  * share key shape and universe semantics: the key is the row query's key
  * (same universe slot, so `listingKeyScope` and the root invalidation
- * cover both) extended with the find-only inputs, and the placeholder keeps
- * previous matches only within one universe — folder-mode row ids are
- * basenames, so another directory's ids could otherwise mark unrelated
- * same-named rows as matches while a scope change's refetch is in flight.
+ * cover both) extended with the find-only inputs, and the placeholder
+ * keeps previous matches only within one universe.
  */
 export function useLogsListingMatches<TRow>({
   filter,
@@ -371,9 +368,7 @@ export function useLogsListingMatches<TRow>({
   listing,
   term,
   enabled,
-  getRowId,
-  rowText,
-  searchKey,
+  searchColumns,
 }: UseLogsListingMatchesParams<TRow>): LogsListingMatches {
   const [matchTerm, setMatchTerm] = useState("");
   // Same 100ms as the shared FindBand's debounce. The debounced callback
@@ -393,14 +388,13 @@ export function useLogsListingMatches<TRow>({
       ...databaseLogsListingKey(scopeKey, accessorsKey, filter, orderBy),
       "find",
       matchTerm,
-      searchKey,
+      searchColumns,
     ],
     queryFn: (): Promise<LogsListingMatch[]> =>
       listingData.getMatches(filter, orderBy, {
         pageSize: kLogsListingPageSize,
         term: matchTerm,
-        getRowId,
-        rowText,
+        searchColumns,
       }),
     enabled: enabled && matchTerm !== "" && scopeKey !== undefined,
     // Keep the previous matches while a keystroke's refetch is in flight —

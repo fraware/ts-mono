@@ -490,23 +490,26 @@ describe("useLogsListingMatches", () => {
     });
     holder.records = records;
     holder.readMatches.mockReset();
-    // The seam double: lowercase-contains over the shaped records, like
-    // getMatches over the scanned rows.
+    // The seam double: lowercase-contains over the search columns' raw
+    // values, like getMatches over the schema's per-column search text.
     holder.readMatches.mockImplementation(
       (
         filter: Condition | undefined,
         orderBy: OrderByModel[] | undefined,
-        find: LogsListingFindQuery<Row>
+        find: LogsListingFindQuery
       ) => {
         const rows = shapedRows(filter, orderBy);
+        const rowText = (row: Row): string =>
+          find.searchColumns
+            .map((columnId) => (row[columnId] as string | undefined) ?? "")
+            .join("\n")
+            .toLowerCase();
         return Promise.resolve(
           rows
             .map((row, offset) => ({ row, offset }))
-            .filter(({ row }) =>
-              find.rowText(row).includes(find.term.toLowerCase())
-            )
+            .filter(({ row }) => rowText(row).includes(find.term.toLowerCase()))
             .map(({ row, offset }) => {
-              const match = { id: find.getRowId(row), offset };
+              const match = { id: row.name, offset };
               return orderBy?.length
                 ? {
                     ...match,
@@ -533,9 +536,7 @@ describe("useLogsListingMatches", () => {
     ...listingParams({ scopeKey: overrides?.scopeKey ?? "logs::/logs" }),
     term: overrides?.term ?? "",
     enabled: overrides?.enabled ?? true,
-    getRowId: (row: Row) => row.name,
-    rowText: (row: Row) => `${row.name}\n${row.model}`.toLowerCase(),
-    searchKey: ["name", "model"],
+    searchColumns: ["name", "model"],
   });
 
   test("reports ids as settled only after the debounced term's result lands", async () => {

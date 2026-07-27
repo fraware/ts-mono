@@ -146,7 +146,7 @@ describe("LogListGrid Find pagination", () => {
             getOverview: () => Promise.reject(new Error("unused")),
           },
         }}
-        shapeRow={() => undefined}
+        rowIdForName={(name) => name}
         hasMoreRows
         fetchMoreRows={() => {}}
         ensureFileOffsetLoaded={holder.ensureOffsetLoaded}
