@@ -7,10 +7,10 @@ import { ensureTrailingSlash, isInDirectory } from "@tsmono/util";
 
 import type { Log } from "../client/api/types";
 import { scopePrefix } from "../client/database";
-import {
-  pageRows,
-  type DatabaseListingPlan,
-  type DatabaseListingResult,
+import type {
+  Cursor,
+  DatabaseListingPlan,
+  DatabaseListingResult,
 } from "../client/database/listing";
 import { directoryRelativeUrl, rootName } from "../utils/uri";
 
@@ -137,14 +137,37 @@ const scanListingRecords = async (
   return records;
 };
 
-const readLogsListing = async (
-  logDir: string,
-  scope: ScanScope,
-  plan: DatabaseListingPlan<LogListingRow>
-): Promise<DatabaseListingResult<LogListingRow>> => {
-  const records = await scanListingRecords(logDir, scope, plan);
-  const total_count = records.length;
-  return { ...pageRows(records, plan.pagination), total_count };
+/** Resolve a pagination request against a result of `total` rows: the
+ *  half-open [start, end) slice plus its continuation cursor. Cursors are
+ *  offsets into the filtered+sorted result (not served-row counts, so a
+ *  dropped hole never desyncs subsequent pages); a backward page is the
+ *  slice before the cursor, and a null backward cursor starts from the
+ *  end. One encoding for both row sources — the db and cache paths must
+ *  agree so a cursor stays meaningful if the source flips mid-session. */
+const pageBounds = (
+  total: number,
+  pagination: Pagination
+): { start: number; end: number; next_cursor: Cursor | null } => {
+  const cursorOffset =
+    pagination.cursor && typeof pagination.cursor.offset === "number"
+      ? pagination.cursor.offset
+      : undefined;
+  const backward = pagination.direction === "backward";
+  const start = backward
+    ? Math.max(0, (cursorOffset ?? total) - pagination.limit)
+    : (cursorOffset ?? 0);
+  const end = backward ? (cursorOffset ?? total) : start + pagination.limit;
+  return {
+    start,
+    end,
+    next_cursor: backward
+      ? start > 0
+        ? { offset: start }
+        : null
+      : end < total
+        ? { offset: end }
+        : null,
+  };
 };
 
 /**
@@ -233,8 +256,9 @@ export interface LogsListingPageResult<
   TRow,
 > extends DatabaseListingResult<TRow> {
   /** Distinct task_ids across the whole filtered universe (see
-   *  {@link LogsListingSnapshot.task_ids}); unset on the cache path, whose
-   *  single page is the whole universe. */
+   *  {@link LogsListingSnapshot.task_ids}) — both row sources report it, so
+   *  the pending anti-join can settle tasks whose files sit on unloaded
+   *  pages. */
   universe_task_ids?: string[];
 }
 
@@ -560,11 +584,29 @@ export const createLogsListingData = (
   ): Promise<LogsListingPageResult<LogListingRow>> => {
     const plan = compilePlan(filter, orderBy);
     if (logsListingSource(logDir) === "cache") {
-      // One unpaged read: cache-only rows already live in memory, so a scan
-      // per read stays the simpler, equally-cheap form. No
-      // universe_task_ids: the single page IS the whole universe, so the
-      // anti-join's loaded-window fallback already covers it.
-      return readLogsListing(logDir, scanScopeFromFilter(logDir, filter), plan);
+      // A scan per read: cache-only rows already live in memory, so this
+      // stays the simpler, equally-cheap form — but the page contract still
+      // holds (a mid-session source flip must not append the whole listing
+      // as one giant "page" to a window of retained db-served pages).
+      const records = await scanListingRecords(
+        logDir,
+        scanScopeFromFilter(logDir, filter),
+        plan
+      );
+      const taskIds = new Set<string>();
+      for (const log of records) {
+        if (log.task_id) taskIds.add(log.task_id);
+      }
+      const { start, end, next_cursor } = pageBounds(
+        records.length,
+        pagination
+      );
+      return {
+        items: records.slice(start, end),
+        total_count: records.length,
+        universe_task_ids: [...taskIds],
+        next_cursor,
+      };
     }
     const snapshot = await fetchSnapshot(
       filter,
@@ -573,15 +615,7 @@ export const createLogsListingData = (
       pagination.limit
     );
     const total = snapshot.total_count;
-    const cursorOffset =
-      pagination.cursor && typeof pagination.cursor.offset === "number"
-        ? pagination.cursor.offset
-        : undefined;
-    const backward = pagination.direction === "backward";
-    const start = backward
-      ? Math.max(0, (cursorOffset ?? total) - pagination.limit)
-      : (cursorOffset ?? 0);
-    const end = backward ? (cursorOffset ?? total) : start + pagination.limit;
+    const { start, end, next_cursor } = pageBounds(total, pagination);
     // The inline first page covers slices from 0 whenever it holds `end`
     // rows — or the whole (shorter) universe. A cached snapshot built under
     // another limit falls through to the bulkGet path.
@@ -594,15 +628,7 @@ export const createLogsListingData = (
       items,
       total_count: total,
       universe_task_ids: snapshot.task_ids,
-      // Cursors index the snapshot's key list (not served-row counts), so a
-      // dropped hole never desyncs subsequent pages.
-      next_cursor: backward
-        ? start > 0
-          ? { offset: start }
-          : null
-        : end < total
-          ? { offset: end }
-          : null,
+      next_cursor,
     };
   };
 

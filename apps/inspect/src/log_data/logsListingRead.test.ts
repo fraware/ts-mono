@@ -657,26 +657,56 @@ describe("LogsListingData.getPage", () => {
     ]);
   });
 
-  test("cache-only scopes fall back to the scan path as one full page", async () => {
+  test("cache-only scopes honor the page contract (a source flip can't re-serve the whole listing as one page)", async () => {
     setRows("/cache/logs", [
-      { name: "/cache/logs/a.json", task: "t" } as Log,
-      { name: "/cache/logs/b.json", task: "t" } as Log,
+      { name: "/cache/logs/a.json", task: "t", task_id: "t-a" } as Log,
+      { name: "/cache/logs/b.json", task: "t", task_id: "t-b" } as Log,
+      { name: "/cache/logs/c.json", task: "t", task_id: "t-c" } as Log,
     ]);
     await databaseService.closeDatabase();
+    const orderBy = [{ column: "name", direction: "ASC" as const }];
 
     const data = createData("/cache/logs");
-    const page = await data.getPage(undefined, undefined, {
+    const first = await data.getPage(undefined, orderBy, {
       cursor: null,
       direction: "forward",
-      limit: 1,
+      limit: 2,
     });
-    // The whole listing in one page: cache-only scopes don't paginate.
-    expect(page.items.map((row) => row.name)).toEqual([
+    expect(first.items.map((row) => row.name)).toEqual([
       "/cache/logs/a.json",
       "/cache/logs/b.json",
     ]);
-    expect(page.total_count).toBe(2);
-    expect(page.next_cursor).toBeNull();
+    expect(first.total_count).toBe(3);
+    // The whole universe's task ids still ride on every page — files on
+    // unloaded pages must settle their pending rows.
+    expect([...(first.universe_task_ids ?? [])].sort()).toEqual([
+      "t-a",
+      "t-b",
+      "t-c",
+    ]);
+    expect(first.next_cursor).toEqual({ offset: 2 });
+
+    const second = await data.getPage(undefined, orderBy, {
+      cursor: first.next_cursor,
+      direction: "forward",
+      limit: 2,
+    });
+    expect(second.items.map((row) => row.name)).toEqual([
+      "/cache/logs/c.json",
+    ]);
+    expect(second.next_cursor).toBeNull();
+
+    // Bidirectional cursors, like the database path.
+    const backward = await data.getPage(undefined, orderBy, {
+      cursor: { offset: 2 },
+      direction: "backward",
+      limit: 2,
+    });
+    expect(backward.items.map((row) => row.name)).toEqual([
+      "/cache/logs/a.json",
+      "/cache/logs/b.json",
+    ]);
+    expect(backward.next_cursor).toBeNull();
   });
 });
 
