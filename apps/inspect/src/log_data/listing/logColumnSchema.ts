@@ -125,6 +125,11 @@ interface ColumnSemantics {
  *  read the same ingestion-derived record fields), so filtering/sorting
  *  through the schema agrees with what the grid displays. */
 const kStaticColumns: Record<string, ColumnSemantics | undefined> = {
+  // The view's row-kind discriminator. Every stored record is a file
+  // (folders and pending tasks are overlay rows with no record), so the
+  // constant keeps find symmetric: "file" matches file rows below the
+  // interface the same way "folder" matches overlay rows above it.
+  type: { getValue: () => "file" },
   task: {
     getValue: (log) => log.task || parseLogFileName(basename(log.name)).name,
   },

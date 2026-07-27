@@ -112,10 +112,6 @@ const views: Record<string, FileLogItemView> = {
   tasks: { mode: "tasks", logDir: "/logs", currentDir: "/logs" },
 };
 
-// View-only columns with no record meaning (the type icon reads the shaped
-// row's file/folder/pending discriminator).
-const kViewOnlyColumns = new Set(["type"]);
-
 describe("column schema / grid accessor parity", () => {
   test.each(
     Object.entries(views).flatMap(([viewName, view]) =>
@@ -136,8 +132,7 @@ describe("column schema / grid accessor parity", () => {
 
     const columnIds = columns
       .map((col) => col.id)
-      .filter((id): id is string => id !== undefined)
-      .filter((id) => !kViewOnlyColumns.has(id));
+      .filter((id): id is string => id !== undefined);
     expect(columnIds.length).toBeGreaterThan(15);
 
     const fromSchema = Object.fromEntries(
