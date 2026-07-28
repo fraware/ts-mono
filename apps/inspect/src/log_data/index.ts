@@ -98,6 +98,7 @@ export {
   invalidateDatabaseLogsListings,
   listingKeyScope,
 } from "./databaseListings";
+export { logsListingEpoch } from "./logsListingEpoch";
 export {
   createLogsListingData,
   readLogsColumnFacts,

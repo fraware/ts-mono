@@ -15,7 +15,10 @@ import type {
   LogsListingFindQuery,
   LogsListingMatch,
 } from "../../../log_data";
-import { invalidateDatabaseLogsListings } from "../../../log_data";
+import {
+  invalidateDatabaseLogsListings,
+  logsListingEpoch,
+} from "../../../log_data";
 import { queryClient as appQueryClient } from "../../../state/queryClient";
 
 import {
@@ -38,12 +41,13 @@ const holder = vi.hoisted(() => ({
 // The hooks import the query-key helpers from the barrel; mock it so the
 // jsdom test doesn't drag in the whole data layer (dexie et al). The read
 // seams themselves are injected through the descriptor's `data` object.
-// Everything these tests need (the key helpers, and the invalidator under
-// test below) lives in databaseListings, which has no storage imports — so
-// the mock is that one real module standing in for the barrel.
-vi.mock("../../../log_data", () =>
-  vi.importActual("../../../log_data/databaseListings")
-);
+// Everything these tests need (the key helpers, the invalidator under test
+// below, and its epoch) lives in two real modules with no storage imports —
+// they stand in for the barrel.
+vi.mock("../../../log_data", async () => ({
+  ...(await vi.importActual("../../../log_data/databaseListings")),
+  ...(await vi.importActual("../../../log_data/logsListingEpoch")),
+}));
 
 const records = [
   { name: "/logs/b.eval", model: "claude" },
@@ -480,49 +484,81 @@ describe("useDatabaseLogsListingQuery", () => {
 });
 
 describe("invalidateDatabaseLogsListings", () => {
+  // These drive the real serialized invalidation loop against the app's
+  // queryClient singleton, so the shipped semantics are what's under test:
+  // an invalidation must not demote an in-flight fetchNextPage; a write
+  // landing during a fetch must still be exposed by a catch-up round; and
+  // the snapshot epoch must never advance mid-refetch (spliced orderings).
+  const wrapper = ({ children }: PropsWithChildren) => (
+    <QueryClientProvider client={appQueryClient}>
+      {children}
+    </QueryClientProvider>
+  );
+
+  /** Page-by-one seam with a one-shot gate on the next `offset > 0` read
+   *  (armed explicitly, so initial loads run ungated). `rowsForRead`
+   *  resolves the row set AFTER the gate — the adversarial order for the
+   *  epoch-coherence test. */
+  const gatedPageByOne = (rowsForRead: () => Row[]) => {
+    let armed = false;
+    let release: (() => void) | undefined;
+    holder.read.mockReset();
+    holder.read.mockImplementation(
+      async (
+        _filter: Condition | undefined,
+        _orderBy: OrderByModel[] | undefined,
+        pagination: Pagination
+      ) => {
+        const offset =
+          typeof pagination.cursor?.offset === "number"
+            ? pagination.cursor.offset
+            : 0;
+        if (offset > 0 && armed) {
+          armed = false;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        const rows = rowsForRead();
+        const end = offset + 1;
+        return {
+          items: rows.slice(offset, end),
+          total_count: rows.length,
+          next_cursor: end < rows.length ? { offset: end } : null,
+        };
+      }
+    );
+    return {
+      armGate: () => {
+        armed = true;
+      },
+      gateBlocked: () => release !== undefined,
+      releaseGate: () => {
+        release?.();
+        release = undefined;
+      },
+    };
+  };
+
+  /** Flush the throttled kick and let the loop drain before restoring real
+   *  timers — a trailing throttle timer discarded by `useRealTimers` would
+   *  wedge the module-level throttle for later tests. */
+  const settleInvalidationLoop = async () => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
+    await waitFor(() => expect(appQueryClient.isFetching()).toBe(0));
+  };
+
   test("an invalidation landing mid-fetchNextPage does not discard the page", async () => {
-    // react-query's default cancelRefetch would cancel the in-flight
-    // next-page fetch and restart it as a refetch of the loaded pages. With
-    // the write path invalidating throughout an ingestion sweep and refetch
-    // cycles slower than its throttle interval at scale, every next-page
-    // fetch got demoted that way and pagination never advanced. The
-    // invalidator must let the in-flight fetch complete (cancelRefetch:
-    // false) — this drives the real invalidator against the app's
-    // queryClient singleton, so the option under test is the shipped one.
+    // The loop never cancels an in-flight fetch: with react-query's default
+    // cancelRefetch the next-page fetch was canceled and restarted as a
+    // refetch of the loaded pages — at scale (writes ~1/s, refetch cycles
+    // slower) every next-page fetch got demoted and pagination stalled.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       holder.records = records;
-      let releasePage2: (() => void) | undefined;
-      holder.read.mockReset();
-      holder.read.mockImplementation(
-        async (
-          filter: Condition | undefined,
-          orderBy: OrderByModel[] | undefined,
-          pagination: Pagination
-        ) => {
-          const rows = shapedRows(filter, orderBy);
-          const offset =
-            typeof pagination.cursor?.offset === "number"
-              ? pagination.cursor.offset
-              : 0;
-          if (offset > 0) {
-            await new Promise<void>((resolve) => {
-              releasePage2 = resolve;
-            });
-          }
-          const end = offset + 1;
-          return {
-            items: rows.slice(offset, end),
-            total_count: rows.length,
-            next_cursor: end < rows.length ? { offset: end } : null,
-          };
-        }
-      );
-      const wrapper = ({ children }: PropsWithChildren) => (
-        <QueryClientProvider client={appQueryClient}>
-          {children}
-        </QueryClientProvider>
-      );
+      const gate = gatedPageByOne(() => shapedRows());
 
       const { result } = renderHook(
         () => useDatabaseLogsListingQuery<Row>(listingParams()),
@@ -532,22 +568,156 @@ describe("invalidateDatabaseLogsListings", () => {
         expect(result.current.result.data?.items.length).toBe(1)
       );
 
+      gate.armGate();
       result.current.fetchNextPage();
-      await waitFor(() => expect(releasePage2).toBeDefined());
+      await waitFor(() => expect(gate.gateBlocked()).toBe(true));
 
-      // The throttled (trailing, 1s) invalidation fires while page 2 is
-      // still in flight.
+      // The throttled kick fires while page 2 is still in flight; the loop
+      // must wait, not cancel.
       invalidateDatabaseLogsListings();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1100);
       });
 
-      act(() => releasePage2!());
+      act(() => gate.releaseGate());
       await waitFor(() =>
         expect(
           result.current.result.data?.items.map((row) => row.name)
         ).toEqual(["/logs/b.eval", "/logs/a.eval"])
       );
+      await settleInvalidationLoop();
+    } finally {
+      vi.useRealTimers();
+      appQueryClient.clear();
+    }
+  });
+
+  test("a write landing mid-fetch is exposed by an automatic catch-up round", async () => {
+    // The skipped-refetch hole of bare cancelRefetch: false — the old fetch's
+    // success cleared the invalidated mark and, with no later write, the
+    // listing stayed stale indefinitely. The dirty loop must refetch after
+    // the in-flight page settles, with no further write, filter change, or
+    // manual invalidation.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      holder.records = records;
+      const gate = gatedPageByOne(() => shapedRows());
+
+      const { result } = renderHook(
+        () => useDatabaseLogsListingQuery<Row>(listingParams()),
+        { wrapper }
+      );
+      await waitFor(() =>
+        expect(result.current.result.data?.items.length).toBe(1)
+      );
+
+      gate.armGate();
+      result.current.fetchNextPage();
+      await waitFor(() => expect(gate.gateBlocked()).toBe(true));
+
+      // The backing rows advance to snapshot B while page 2 (snapshot A) is
+      // in flight, and the write invalidates.
+      holder.records = [...records, { name: "/logs/c.eval", model: "claude" }];
+      invalidateDatabaseLogsListings();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1100);
+      });
+
+      act(() => gate.releaseGate());
+      // The in-flight page lands un-demoted...
+      await waitFor(() =>
+        expect(
+          result.current.result.data?.items.map((row) => row.name)
+        ).toEqual(["/logs/b.eval", "/logs/a.eval"])
+      );
+      // ...and the loop's catch-up round exposes B on its own.
+      await waitFor(() =>
+        expect(result.current.result.data?.total_count).toBe(3)
+      );
+      expect(result.current.hasNextPage).toBe(true);
+      await settleInvalidationLoop();
+    } finally {
+      vi.useRealTimers();
+      appQueryClient.clear();
+    }
+  });
+
+  test("an invalidation during a multi-page refetch never splices orderings", async () => {
+    // Reads snapshot per epoch (mirroring the real data layer): if the loop
+    // bumped the epoch mid-refetch, the still-running pass would serve later
+    // pages from the re-ordered snapshot — duplicate/missing rows in one
+    // committed window. The loop must defer the bump to its next round.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      holder.records = [
+        { name: "/logs/r1.eval", model: "m" },
+        { name: "/logs/r2.eval", model: "m" },
+        { name: "/logs/r3.eval", model: "m" },
+        { name: "/logs/r4.eval", model: "m" },
+      ];
+      const snapshots = new Map<number, Row[]>();
+      const epochRows = () => {
+        const epoch = logsListingEpoch();
+        let rows = snapshots.get(epoch);
+        if (rows === undefined) {
+          rows = shapedRows();
+          snapshots.set(epoch, rows);
+        }
+        return rows;
+      };
+      const gate = gatedPageByOne(epochRows);
+
+      const history: string[][] = [];
+      const { result } = renderHook(
+        () => {
+          const query = useDatabaseLogsListingQuery<Row>(listingParams());
+          const items = query.result.data?.items;
+          if (items) {
+            const names = items.map((row) => row.name);
+            if (history.at(-1)?.join() !== names.join()) {
+              history.push(names);
+            }
+          }
+          return query;
+        },
+        { wrapper }
+      );
+      await waitFor(() =>
+        expect(result.current.result.data?.items.length).toBe(1)
+      );
+      result.current.fetchNextPage();
+      await waitFor(() =>
+        expect(result.current.result.data?.items.length).toBe(2)
+      );
+
+      // A write triggers a refetch of the two retained pages; page 2 of the
+      // refetch blocks mid-pass.
+      gate.armGate();
+      invalidateDatabaseLogsListings();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1100);
+      });
+      await waitFor(() => expect(gate.gateBlocked()).toBe(true));
+
+      // Mid-refetch: the backing rows re-order and another write lands.
+      holder.records = [...holder.records].reverse();
+      invalidateDatabaseLogsListings();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1100);
+      });
+
+      act(() => gate.releaseGate());
+      // The loop's follow-up round exposes the new ordering...
+      await waitFor(() =>
+        expect(
+          result.current.result.data?.items.map((row) => row.name)
+        ).toEqual(["/logs/r4.eval", "/logs/r3.eval"])
+      );
+      // ...and no committed window ever mixed the two orderings.
+      for (const names of history) {
+        expect(new Set(names).size).toBe(names.length);
+      }
+      await settleInvalidationLoop();
     } finally {
       vi.useRealTimers();
       appQueryClient.clear();
