@@ -555,7 +555,12 @@ describe("FetchEngine.start", () => {
     });
 
     expect(sinkCalls.seedRows).toEqual([rows]);
-    expect(engine.listing()).toEqual(rows);
+    // The engine retains bare handles, not the seeded full rows — keeping
+    // the read-back's content tiers would make it an O(dir) full-row holder.
+    expect(engine.listing()).toEqual([
+      handle("a.eval", 2),
+      handle("b.eval", 1),
+    ]);
     // Seeding is cache-only: nothing is re-persisted or fetched.
     expect(sinkCalls.writeDetails).toEqual([]);
     // All rows had zero attempts/errors/seq, so no fetch-state reset write.
@@ -591,7 +596,9 @@ describe("FetchEngine.applyListing", () => {
       "changed.eval",
       "added.eval",
     ]);
-    expect(engine.listing()).toEqual(full);
+    // `full` (the persisted read-back) carries row content; the engine's
+    // retained listing is the handle projection of it.
+    expect(engine.listing()).toEqual([kept, changed, added]);
 
     // Invalidated + missing details and previews get fetched; kept has both.
     await vi.waitFor(() => {

@@ -205,6 +205,19 @@ const emptyFetchState = (): LogFetchState => ({
   details_settled_seq: 0,
 });
 
+/** Project rows to bare handles before retaining them as `_handles`: the
+ *  sources are often full `Log` rows (db read-backs, headers included), and
+ *  structural typing would silently retain all of that — O(dir) full rows
+ *  for the life of the dir — when the engine only ever reads the handle
+ *  columns (name resolution, mtime diffing). */
+const toHandles = (rows: LogHandle[]): LogHandle[] =>
+  rows.map(({ name, task, task_id, mtime }) => ({
+    name,
+    task,
+    task_id,
+    mtime,
+  }));
+
 export class FetchEngine {
   private _deps: FetchEngineDeps | undefined = undefined;
 
@@ -644,7 +657,7 @@ export class FetchEngine {
       return;
     }
     deps.sink.seedRows(rows);
-    this._handles = rows;
+    this._handles = toHandles(rows);
 
     // A restart retries every previously-failed file once more — zero the
     // attempts (but keep the error text visible until it's superseded) and
@@ -906,7 +919,7 @@ export class FetchEngine {
       deps.sink.setListing(update.listing);
       full = update.listing;
     }
-    this._handles = full;
+    this._handles = toHandles(full);
 
     const invalidatedSet = new Set(update.invalidated);
     const invalidated = full.filter((handle) =>
