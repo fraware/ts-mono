@@ -73,13 +73,19 @@
 >   driven by the virtualizer's visible range. Prerequisite for bounded
 >   direct jumps and the remaining step 5 features; bounds window memory
 >   for real (with step 7).
-> - Step 7 mirror demotion — the react-query logs mirror still holds every
->   row, so steady-state memory stays O(dir) no matter how the read path
->   paginates. **Now unblocked**: with the columns-schema and samples-page
->   projections landed (below), no full-row mirror subscribers remain in
->   db-backed sessions — the remaining `useLogs`/`getLogRows` readers
->   resolve names only (identity tier), which is exactly the slimmed form
->   step 7 proposes. `useLogListing` is deleted.
+> - ~~Step 7 mirror demotion~~ — **landed**. Where the database is the row
+>   source, the collection keeps identity-tier rows only (`identityRow` in
+>   `logsContent.ts` — handle columns + depth + retrieval facts); the
+>   remaining consumers (`resolveLogKey`, `log.ts` key resolution) read
+>   names. Cache-source scopes (db-less, out-of-namespace) keep full rows —
+>   the mirror IS the row source there. `logsListingSource` moved into
+>   `logsContent` so the read side and the mirror tier share one authority,
+>   and per-entity pushes merge over the entry's own value (a slim
+>   collection base would strip an observed log view's header on the next
+>   preview patch). FetchEngine's `_handles` is projected to bare handles
+>   for the same reason (`toHandles`) — it retained full db read-backs via
+>   structural typing. Per-log full rows now live only in IndexedDB and
+>   observation-bounded caches (per-entity entries, snapshot/page reads).
 > - The samples halves of steps 2–4: `/samples` sample rows still arrive as
 >   one unpaged read (`useSamplesListing`) filtered/sorted client-side in
 >   `SamplesGrid`. The *log-side* half is done: membership (subtree +
@@ -449,7 +455,8 @@ explicit answer in phase 3:
 Where things stand (details in the Status header): step 1 is landed as the
 plan compiler only — no index choice, blocked on persisting `retried`;
 steps 2–4 are landed for the logs listing, with their samples halves and
-step 3's scope-prefix invalidation outstanding; steps 5–7 are untouched.
+step 3's scope-prefix invalidation outstanding; step 7 is landed; steps
+5–6 are untouched.
 Parity tests live in `log_data/logsListingRead.test.ts`.
 
 1. **Query planner + record evaluation** (pure, heavily testable):
@@ -491,19 +498,19 @@ Parity tests live in `log_data/logsListingRead.test.ts`.
    `summary.completed_at` the default samples sort index or is the scan +
    JS sort fine at target scale — measure first).
 7. **Mirror demotion** (the last full-list holder): the react-query logs
-   collection (`logsKey(logDir)`) still mirrors every row — headers
-   included as details land — via the db ⟹ cache invariant, so memory
-   stays O(dir) no matter how the read path paginates. In db-backed
-   sessions, slim the mirror to what its remaining consumers actually need
-   (the identity tier), keeping the full mirror only where it *is* the row
-   source (db-less and out-of-namespace cache-only scopes — full-in-memory
-   is unavoidable and correct there). Audit consumers first:
-   `resolveLogKey`, slice/routing reads (`getLogRows`), `useLogs`,
-   single-file mode seeding, and the samples paths.
+   collection (`logsKey(logDir)`) mirrored every row — headers included as
+   details landed — via the db ⟹ cache invariant, so memory stayed O(dir)
+   no matter how the read path paginated. *Landed* (see the Status
+   header): identity-tier rows where the database is the row source, full
+   rows where the mirror is (db-less and out-of-namespace cache-only
+   scopes — full-in-memory is unavoidable and correct there). The consumer
+   audit that gated this (resolveLogKey, `getLogRows`, `useLogs`,
+   single-file seeding, samples paths) is what steps A of the samples work
+   and the columns-schema aggregate cleared.
 
 Phase 1→2 order matters less than it looks: 1 and 2 land invisible behind
-parity tests; 3+4 flip the pages over; 5 can trail; 7 lands once nothing
-on the paginated path reads the full mirror.
+parity tests; 3+4 flip the pages over; 5 can trail; 7 landed once nothing
+on the paginated path read the full mirror.
 
 ## Chunked listing ingestion (separate workstream, server-dependent)
 
