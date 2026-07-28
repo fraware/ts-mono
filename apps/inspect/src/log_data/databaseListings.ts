@@ -42,13 +42,18 @@ export const listingKeyScope = (queryKey: readonly unknown[]): unknown =>
  * back-to-back for a whole sync, and a trailing-only debounce would postpone
  * the invalidation for the entire burst instead of updating incrementally.
  *
- * The interval must exceed a refetch cycle at target scale, not just coalesce
- * writes: `invalidateQueries` cancels and restarts an in-flight refetch, and
- * a 20k-row dir's cycle (snapshot rebuild + page re-reads + the overview
- * scan) runs ~0.5-1s — at the previous 100ms the cycle restarted forever, so
- * results rarely landed and the row query never went idle (starving
- * `fetchNextPage`, which no-ops while a fetch is in flight). Measured on a
- * 20k-file stress dir; revisit alongside the index-backed snapshot build.
+ * `cancelRefetch: false` because by default `invalidateQueries` cancels an
+ * in-flight fetch and restarts it as a refetch of the loaded pages — which
+ * demotes an in-flight `fetchNextPage` and discards its page. When a dir's
+ * refetch cycle (snapshot rebuild + page re-reads) outlasts the throttle
+ * interval — ~1.2s on a 50k-row stress dir — every next-page fetch got
+ * demoted before it could land and pagination stalled for as long as the
+ * ingestion sweep kept writing. Skipping instead means the in-flight fetch
+ * completes and the query stays marked stale; the next trigger (during a
+ * burst, at most one interval away) picks up the bumped epoch. The tail
+ * case — a burst's LAST invalidation skipping because a fetch was in
+ * flight — leaves loaded pages one epoch stale until the next write or
+ * query-input change; accepted, the listing is asynchronous by design.
  */
 export const invalidateDatabaseLogsListings: () => void = throttle(
   () => {
@@ -56,9 +61,10 @@ export const invalidateDatabaseLogsListings: () => void = throttle(
     // not be served the pre-write ones (see logsListingEpoch).
     bumpLogsListingEpoch();
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    queryClient.invalidateQueries({
-      queryKey: databaseLogsListingKeyRoot,
-    });
+    queryClient.invalidateQueries(
+      { queryKey: databaseLogsListingKeyRoot },
+      { cancelRefetch: false }
+    );
   },
   1000,
   { leading: false }

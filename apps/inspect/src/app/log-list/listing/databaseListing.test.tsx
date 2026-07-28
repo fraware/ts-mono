@@ -15,6 +15,8 @@ import type {
   LogsListingFindQuery,
   LogsListingMatch,
 } from "../../../log_data";
+import { invalidateDatabaseLogsListings } from "../../../log_data";
+import { queryClient as appQueryClient } from "../../../state/queryClient";
 
 import {
   useDatabaseLogsListingQuery,
@@ -36,16 +38,12 @@ const holder = vi.hoisted(() => ({
 // The hooks import the query-key helpers from the barrel; mock it so the
 // jsdom test doesn't drag in the whole data layer (dexie et al). The read
 // seams themselves are injected through the descriptor's `data` object.
-vi.mock("../../../log_data", () => ({
-  databaseLogsListingKeyRoot: ["log_data", "dexie-listing", "logs"],
-  databaseLogsListingKey: (...parts: unknown[]) => [
-    "log_data",
-    "dexie-listing",
-    "logs",
-    ...parts.map((part) => part ?? null),
-  ],
-  listingKeyScope: (queryKey: readonly unknown[]) => queryKey[3],
-}));
+// Everything these tests need (the key helpers, and the invalidator under
+// test below) lives in databaseListings, which has no storage imports — so
+// the mock is that one real module standing in for the barrel.
+vi.mock("../../../log_data", () =>
+  vi.importActual("../../../log_data/databaseListings")
+);
 
 const records = [
   { name: "/logs/b.eval", model: "claude" },
@@ -478,6 +476,82 @@ describe("useDatabaseLogsListingQuery", () => {
     expect(result.current.result.data).toBeUndefined();
     expect(result.current.result.loading).toBe(true);
     await waitFor(() => expect(result.current.result.data).toBeDefined());
+  });
+});
+
+describe("invalidateDatabaseLogsListings", () => {
+  test("an invalidation landing mid-fetchNextPage does not discard the page", async () => {
+    // react-query's default cancelRefetch would cancel the in-flight
+    // next-page fetch and restart it as a refetch of the loaded pages. With
+    // the write path invalidating throughout an ingestion sweep and refetch
+    // cycles slower than its throttle interval at scale, every next-page
+    // fetch got demoted that way and pagination never advanced. The
+    // invalidator must let the in-flight fetch complete (cancelRefetch:
+    // false) — this drives the real invalidator against the app's
+    // queryClient singleton, so the option under test is the shipped one.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      holder.records = records;
+      let releasePage2: (() => void) | undefined;
+      holder.read.mockReset();
+      holder.read.mockImplementation(
+        async (
+          filter: Condition | undefined,
+          orderBy: OrderByModel[] | undefined,
+          pagination: Pagination
+        ) => {
+          const rows = shapedRows(filter, orderBy);
+          const offset =
+            typeof pagination.cursor?.offset === "number"
+              ? pagination.cursor.offset
+              : 0;
+          if (offset > 0) {
+            await new Promise<void>((resolve) => {
+              releasePage2 = resolve;
+            });
+          }
+          const end = offset + 1;
+          return {
+            items: rows.slice(offset, end),
+            total_count: rows.length,
+            next_cursor: end < rows.length ? { offset: end } : null,
+          };
+        }
+      );
+      const wrapper = ({ children }: PropsWithChildren) => (
+        <QueryClientProvider client={appQueryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+
+      const { result } = renderHook(
+        () => useDatabaseLogsListingQuery<Row>(listingParams()),
+        { wrapper }
+      );
+      await waitFor(() =>
+        expect(result.current.result.data?.items.length).toBe(1)
+      );
+
+      result.current.fetchNextPage();
+      await waitFor(() => expect(releasePage2).toBeDefined());
+
+      // The throttled (trailing, 1s) invalidation fires while page 2 is
+      // still in flight.
+      invalidateDatabaseLogsListings();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1100);
+      });
+
+      act(() => releasePage2!());
+      await waitFor(() =>
+        expect(
+          result.current.result.data?.items.map((row) => row.name)
+        ).toEqual(["/logs/b.eval", "/logs/a.eval"])
+      );
+    } finally {
+      vi.useRealTimers();
+      appQueryClient.clear();
+    }
   });
 });
 
