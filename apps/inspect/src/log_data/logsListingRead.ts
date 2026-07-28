@@ -22,25 +22,13 @@ import {
 import { createListingPlan } from "./listing/planner";
 import { joinSearchText } from "./listing/searchText";
 import { computeLogsWithRetried, type LogListingRow } from "./logListing";
-import { getLogRows, isCacheOnlyListingScope } from "./logsContent";
+import {
+  getLogRows,
+  isCacheOnlyListingScope,
+  logsListingSource,
+} from "./logsContent";
 import { logsListingEpoch } from "./logsListingEpoch";
 import { computeScorerMap, type ScorerMap } from "./scoreSchema";
-
-/**
- * Where listing queries for `logDir` read their rows — an explicit,
- * scope-level decision rather than a per-query fallback:
- *
- * - "database": the normal dir-mode path; IndexedDB holds the replicated
- *   rows and is the row source.
- * - "cache": the react-query logs cache is the row source. This serves the
- *   out-of-namespace degrade (listing persistence skipped — see
- *   `namesInScope` in logsContent) and db-less sessions (the database
- *   failed to open; single-file mode renders no log list at all).
- */
-const logsListingSource = (logDir: string): "database" | "cache" =>
-  getDatabaseService().opened() && !isCacheOnlyListingScope(logDir)
-    ? "database"
-    : "cache";
 
 /** Where a listing read scans (derived from the filter — see
  *  {@link scanScopeFromFilter}): the db path uses `parentDir` (a
