@@ -39,12 +39,21 @@ export const syncListing = async (
       serverLogs.files.some((file) => !localNames.has(file.name));
 
     if (changed) {
-      // Invalidate everything and activate the new list.
+      // Reconcile and PERSIST: paginated listing reads are database-backed,
+      // so a cache-only activation would leave the UI serving the stale
+      // rows (and removed files would linger as ghosts). Names absent from
+      // the server list are deletions; surviving names are invalidated
+      // wholesale — with no mtimes there is no way to tell which changed.
+      const serverNames = new Set(serverLogs.files.map((file) => file.name));
       return engine.applyListing({
         listing: serverLogs.files,
-        invalidated: localFiles.map((file) => file.name),
-        deleted: [],
-        persistListing: false,
+        invalidated: localFiles
+          .filter((file) => serverNames.has(file.name))
+          .map((file) => file.name),
+        deleted: localFiles
+          .filter((file) => !serverNames.has(file.name))
+          .map((file) => file.name),
+        persistListing: true,
         epoch,
       });
     }

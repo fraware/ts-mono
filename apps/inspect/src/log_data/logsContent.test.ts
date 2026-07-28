@@ -5,7 +5,12 @@
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import type { Log, LogHeader, LogPreview } from "../client/api/types";
+import type {
+  ClientAPI,
+  Log,
+  LogHeader,
+  LogPreview,
+} from "../client/api/types";
 import { DB_NAME } from "../client/database/schema";
 import {
   createDatabaseService,
@@ -13,8 +18,11 @@ import {
 } from "../client/database/service";
 import { queryClient } from "../state/queryClient";
 
+import { FetchEngine } from "./fetchEngine";
+import { syncListing } from "./listingSync";
 import {
   clearFile,
+  createLogsContentSink,
   getLogRows,
   logKey,
   resolveLogKey,
@@ -117,6 +125,88 @@ describe("db-less write invalidation", () => {
 
   test("a db-less file clear refreshes the listings", async () => {
     await clearFile(null, "/plain/logs", "/plain/logs/a.eval");
+    expect(invalidateListings).toHaveBeenCalled();
+  });
+});
+
+describe("static listing reconciliation", () => {
+  // End-to-end over the real seam (syncListing → FetchEngine → real sink →
+  // fake-indexeddb): a static (no-mtime) listing change must reconcile the
+  // DATABASE, not just the cache — paginated listing reads are db-backed,
+  // so a cache-only activation would serve stale rows and retain deleted
+  // files as ghosts.
+  const logDir = "file:///logs";
+  const name = (stem: string) => `${logDir}/${stem}.eval`;
+  let db: DatabaseService;
+  let engine: FetchEngine;
+
+  beforeEach(async () => {
+    invalidateListings.mockClear();
+    db = createDatabaseService();
+    holder.service = db;
+    await db.openDatabase();
+  });
+
+  afterEach(async () => {
+    engine?.stop();
+    holder.service = null;
+    queryClient.clear();
+    await db.closeDatabase();
+    await Dexie.delete(DB_NAME);
+  });
+
+  test("a changed static full response leaves only the new names, everywhere", async () => {
+    const responses = [
+      { files: [{ name: name("a") }, { name: name("b") }] },
+      { files: [{ name: name("b") }, { name: name("c") }] },
+    ];
+    let call = 0;
+    const api = {
+      get_logs: () =>
+        Promise.resolve({
+          response_type: "full" as const,
+          files: responses[Math.min(call++, 1)]!.files,
+        }),
+      // Backfill workers run after the sync settles; keep them inert.
+      get_log_summaries_settled: () => Promise.resolve([]),
+      get_log_details: () => Promise.reject(new Error("not under test")),
+    } as unknown as ClientAPI;
+
+    engine = new FetchEngine({ flushDelayMs: 0, statsDelayMs: 0 });
+    await engine.start({
+      api,
+      database: db,
+      sink: createLogsContentSink(db, logDir),
+      logDir,
+    });
+
+    // First sync persists the static listing (cold db: full write).
+    await syncListing(api, engine);
+    expect(
+      (await db.readLogs({ prefix: logDir }))?.map((row) => row.name)
+    ).toEqual([name("a"), name("b")]);
+
+    invalidateListings.mockClear();
+    // The changed static response: `a` deleted, `c` added.
+    await syncListing(api, engine);
+
+    const expected = [name("b"), name("c")];
+    const stored = (await db.readLogs({ prefix: logDir }))?.map(
+      (row) => row.name
+    );
+    expect(stored?.sort()).toEqual(expected);
+    expect(
+      engine
+        .listing()
+        .map((h) => h.name)
+        .sort()
+    ).toEqual(expected);
+    expect(
+      getLogRows(logDir)
+        .map((row) => row.name)
+        .sort()
+    ).toEqual(expected);
+    // The UI refreshes without a manual retry or unrelated write.
     expect(invalidateListings).toHaveBeenCalled();
   });
 });
