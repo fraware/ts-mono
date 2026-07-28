@@ -319,14 +319,28 @@ const namesInScope = (logDir: string, handles: LogHandle[]): boolean => {
  * The db write is a merge-upsert (rows keep depth/content) and the cache
  * holds the full re-read, so the full list is read back and returned for the
  * caller's continued sync logic.
+ *
+ * `changed` narrows the db write to the handles whose identity actually
+ * drifted (the engine diffs against its mirror — see `changedHandles`):
+ * the server's `>=`-mtime boundary re-sends make unchanged-listing syncs
+ * the steady state, and rewriting all rows for those held the store's
+ * single rw transaction long enough to starve every concurrent listing
+ * read at large scale. An unchanged sync also skips the listing
+ * invalidation — nothing it refetches would differ, and an errored row
+ * query's recovery deliberately stays with the retry banner / real writes
+ * (see `useDatabaseLogsListingQuery.error`). Defaulted to `handles`:
+ * callers that computed no diff persist everything, as before.
  */
 export const writeListing = async (
   db: DatabaseService | null | undefined,
   logDir: string,
-  handles: LogHandle[]
+  handles: LogHandle[],
+  changed: LogHandle[] = handles
 ): Promise<Log[]> => {
   if (db?.opened() && namesInScope(logDir, handles)) {
-    await db.writeLogs(handles);
+    if (changed.length > 0) {
+      await db.writeLogs(changed);
+    }
     await db.markScopeSynced(logDir);
     const all = await db.readLogs({ prefix: logDir });
     if (all) {
@@ -334,7 +348,9 @@ export const writeListing = async (
       // Invalidate only after the re-read rows land in the cache: a listing
       // refetch scheduled between the write and setRows would run against
       // the pre-write rows and drop the newly written files from its result.
-      invalidateDatabaseLogsListings();
+      if (changed.length > 0) {
+        invalidateDatabaseLogsListings();
+      }
       return all;
     }
     // A failed read-back degrades to the cache-only listing write below.
@@ -506,7 +522,8 @@ export const createLogsContentSink = (
   isCacheOnlyScope: () => isCacheOnlyListingScope(logDir),
   setListing: (handles) => setListing(logDir, handles),
   mergePreviews: (previews) => mergePreviews(logDir, previews),
-  writeListing: (handles) => writeListing(db, logDir, handles),
+  writeListing: (handles, changed) =>
+    writeListing(db, logDir, handles, changed),
   writePreviews: (previews) => writePreviews(db, logDir, previews),
   writeDetails: (details) => writeDetails(db, logDir, details),
   mergeFetchStates: (states) => mergeFetchStates(logDir, states),

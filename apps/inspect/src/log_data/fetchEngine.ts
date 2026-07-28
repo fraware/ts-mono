@@ -104,7 +104,13 @@ export interface LogsContentSink {
   seedRows(rows: Log[]): void;
   setListing(handles: LogHandle[]): void;
   mergePreviews(previews: Record<string, LogPreview>): void;
-  writeListing(handles: LogHandle[]): Promise<Log[]>;
+  /** Persist the listing identity tier and return the scope's full row list
+   *  (read back post-write). `handles` is the full activation list — the
+   *  cache fallback (db-less sessions, out-of-namespace scopes) stores it
+   *  whole; `changed` is the subset that actually needs an identity write
+   *  (empty: nothing drifted — skip the write and its invalidation, still
+   *  read back). */
+  writeListing(handles: LogHandle[], changed: LogHandle[]): Promise<Log[]>;
   writePreviews(previews: Record<string, LogPreview>): Promise<void>;
   writeDetails(details: Record<string, LogDetails>): Promise<void>;
   mergeFetchStates(states: Record<string, LogFetchState>): void;
@@ -138,11 +144,11 @@ export interface FetchEngineStatus {
 
 /**
  * A replication discovery result. `listing` is the server's listing (a delta
- * or the full list — `persistListing` upserts it into the database and
- * re-reads the full list; otherwise it's activated cache-only, for static
- * listings that carry no mtimes to sync by). `invalidated` names files whose
- * cached content is stale (new/changed); `deleted` names files that no longer
- * exist.
+ * or the full list — `persistListing` upserts what drifted from the engine's
+ * mirror (see `changedHandles`) into the database and re-reads the full
+ * list; otherwise it's activated cache-only, for static listings that carry
+ * no mtimes to sync by). `invalidated` names files whose cached content is
+ * stale (new/changed); `deleted` names files that no longer exist.
  */
 export interface ListingUpdate {
   listing: LogHandle[];
@@ -217,6 +223,33 @@ const toHandles = (rows: LogHandle[]): LogHandle[] =>
     task_id,
     mtime,
   }));
+
+/** Handles whose identity tier needs (re)writing: new names, plus known
+ *  names whose identity fields drifted from the activated mirror. The
+ *  mirror is authoritative for what was last persisted (seeded from the db
+ *  at start, advanced only after a successful persist + read-back, reset by
+ *  clearData), so an unchanged listing sync diffs to [] — without this,
+ *  the server's `>=`-mtime boundary re-sends turn every poll tick into an
+ *  O(dir) identity rewrite whose single rw transaction starves every
+ *  concurrent listing read for the duration (tens of seconds at 50k rows).
+ *  Compares exactly the fields the identity upsert writes (and `toHandles`
+ *  retains); null/undefined are equivalent (server payloads use null, the
+ *  db round-trip yields undefined). */
+const changedHandles = (
+  listing: LogHandle[],
+  prev: LogHandle[]
+): LogHandle[] => {
+  const prevByName = new Map(prev.map((handle) => [handle.name, handle]));
+  return listing.filter((handle) => {
+    const known = prevByName.get(handle.name);
+    return (
+      known === undefined ||
+      (known.mtime ?? undefined) !== (handle.mtime ?? undefined) ||
+      (known.task ?? undefined) !== (handle.task ?? undefined) ||
+      (known.task_id ?? undefined) !== (handle.task_id ?? undefined)
+    );
+  });
+};
 
 export class FetchEngine {
   private _deps: FetchEngineDeps | undefined = undefined;
@@ -910,7 +943,10 @@ export class FetchEngine {
     let full: Log[] | LogHandle[];
     let rows: Log[] | undefined;
     if (update.persistListing) {
-      rows = await deps.sink.writeListing(update.listing);
+      rows = await deps.sink.writeListing(
+        update.listing,
+        changedHandles(update.listing, this._handles)
+      );
       if (epoch !== this._epoch) {
         return this._handles;
       }

@@ -65,6 +65,22 @@ describe("writeListing", () => {
     expect((await db.getSyncScope("file:///logs"))?.last_synced).toBeDefined();
   });
 
+  test("an empty changed set skips the identity write and the listing invalidation", async () => {
+    const handles = [{ name: "file:///logs/a.eval", mtime: 5 }];
+    await writeListing(db, "file:///logs", handles);
+    expect(invalidateListings).toHaveBeenCalled();
+    invalidateListings.mockClear();
+    const writeSpy = vi.spyOn(db, "writeLogs");
+
+    // The unchanged re-sync (engine diffed the listing to nothing): no
+    // write, no invalidation — but the read-back contract still holds.
+    const rows = await writeListing(db, "file:///logs", handles, []);
+
+    expect(rows.map((row) => row.name)).toEqual(["file:///logs/a.eval"]);
+    expect(writeSpy).not.toHaveBeenCalled();
+    expect(invalidateListings).not.toHaveBeenCalled();
+  });
+
   test("degrades to cache-only when names are outside the dir's namespace", async () => {
     // An older view server: aliased-path log_dir, file:// URI names.
     const rows = await writeListing(db, "~/logs", [

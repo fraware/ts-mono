@@ -262,6 +262,7 @@ const createFakeSink = (db?: DatabaseService) => {
     setListing: [] as LogHandle[][],
     mergePreviews: [] as Record<string, LogPreview>[],
     writeListing: [] as LogHandle[][],
+    writeListingChanged: [] as LogHandle[][],
     writePreviews: [] as Record<string, LogPreview>[],
     writeDetails: [] as Record<string, LogDetails>[],
     mergeFetchStates: [] as Record<string, LogFetchState>[],
@@ -290,8 +291,9 @@ const createFakeSink = (db?: DatabaseService) => {
         upsert(name, { depth: "previewed", status: preview.status })
       );
     },
-    writeListing: async (handles) => {
+    writeListing: async (handles, changed) => {
       calls.writeListing.push(handles);
+      calls.writeListingChanged.push(changed);
       const known: Record<string, Log> = db
         ? await db.readLogRows(handles.map((h) => h.name))
         : {};
@@ -611,6 +613,56 @@ describe("FetchEngine.applyListing", () => {
         "changed.eval",
       ]);
     });
+  });
+
+  it("persists only handles whose identity drifted from the activated mirror", async () => {
+    const same = handle("same.eval", 1);
+    const bumped = handle("bumped.eval", 2);
+    const fresh = handle("fresh.eval", 3);
+    const fake = createFakeApi();
+    const { engine, sinkCalls } = await createEngine({
+      api: fake.api,
+      database: createFakeDb([
+        listedRow(same),
+        listedRow(handle("bumped.eval", 1)),
+      ]),
+    });
+
+    await engine.applyListing({
+      listing: [same, bumped, fresh],
+      invalidated: ["bumped.eval", "fresh.eval"],
+      deleted: [],
+      persistListing: true,
+    });
+
+    // The sink still activates the full listing (its first argument feeds
+    // the cache fallback and the read-back), but only the drifted handles
+    // are marked for the identity write.
+    expect(sinkCalls.writeListing).toEqual([[same, bumped, fresh]]);
+    expect(sinkCalls.writeListingChanged).toEqual([[bumped, fresh]]);
+  });
+
+  it("an unchanged listing re-sync persists nothing", async () => {
+    // The server's `>=`-mtime filter re-sends boundary files on every poll,
+    // so unchanged listings are the steady state of the periodic re-sync —
+    // they must not rewrite the identity tier (a whole-dir rw transaction
+    // that starves concurrent listing reads at scale).
+    const a = handle("a.eval", 1);
+    const b = handle("b.eval", 2);
+    const fake = createFakeApi();
+    const { engine, sinkCalls } = await createEngine({
+      api: fake.api,
+      database: createFakeDb([listedRow(a), listedRow(b)]),
+    });
+
+    await engine.applyListing({
+      listing: [a, b],
+      invalidated: [],
+      deleted: [],
+      persistListing: true,
+    });
+
+    expect(sinkCalls.writeListingChanged).toEqual([[]]);
   });
 
   it("fetches invalidated details fresh (a memoized remote file would re-serve the stale snapshot)", async () => {
