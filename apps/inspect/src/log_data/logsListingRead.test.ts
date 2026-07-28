@@ -32,6 +32,7 @@ import {
   createLogsListingData,
   readLogsColumnFacts,
   readLogsOverview,
+  readSamplesLogFacts,
   type LogsListingData,
   type LogsListingPageResult,
 } from "./logsListingRead";
@@ -967,6 +968,94 @@ describe("readLogsColumnFacts", () => {
       (await readLogsColumnFacts("/test/logs", "/test/logs/sub2"))
         .hasSampleLimits
     ).toBe(false);
+  });
+});
+
+describe("readSamplesLogFacts", () => {
+  let databaseService: DatabaseService;
+
+  beforeEach(async () => {
+    databaseService = createDatabaseService();
+    holder.service = databaseService;
+    await databaseService.openDatabase();
+  });
+
+  afterEach(async () => {
+    await databaseService.closeDatabase();
+    await Dexie.delete(DB_NAME);
+  });
+
+  test("membership is the retried-hidden subtree, boundary-safe", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/sub/a.json": preview({ task_id: "t-a" }),
+      // Same parent dir + task_id: the older run is retried.
+      "/test/logs/sub/2024-01-01_x.json": preview({ task_id: "shared" }),
+      "/test/logs/sub/2024-01-02_x.json": preview({ task_id: "shared" }),
+      // Prefix-sharing sibling directory: not in scope.
+      "/test/logs/sub2/c.json": preview({ task_id: "t-c" }),
+    });
+
+    const hidden = await readSamplesLogFacts("/test/logs", "/test/logs/sub", {
+      showRetriedLogs: false,
+    });
+    expect(hidden.fileNames.sort()).toEqual([
+      "/test/logs/sub/2024-01-02_x.json",
+      "/test/logs/sub/a.json",
+    ]);
+    expect(hidden.retriedCount).toBe(1);
+    expect(hidden.taskIds.sort()).toEqual(["shared", "t-a"]);
+
+    const shown = await readSamplesLogFacts("/test/logs", "/test/logs/sub", {
+      showRetriedLogs: true,
+    });
+    expect(shown.fileNames).toHaveLength(3);
+    // The toggle's visibility must not depend on the toggle's state.
+    expect(shown.retriedCount).toBe(1);
+  });
+
+  test("completedCount counts settled logs only (no status ≠ completed)", async () => {
+    await databaseService.writeLogPreviews({
+      "/test/logs/a.json": preview({ task_id: "t-a", status: "success" }),
+      "/test/logs/b.json": preview({ task_id: "t-b", status: "started" }),
+      "/test/logs/c.json": preview({ task_id: "t-c", status: "error" }),
+    });
+    // Listed-only row: no preview yet, so no status — in the membership,
+    // but neither started nor completed.
+    await databaseService.writeLogs([{ name: "/test/logs/d.json" }]);
+
+    const facts = await readSamplesLogFacts("/test/logs", "/test/logs", {
+      showRetriedLogs: false,
+    });
+
+    expect(facts.fileNames).toHaveLength(4);
+    expect(facts.completedCount).toBe(2);
+    // The listed-only row has no task_id and must not contribute one.
+    expect(facts.taskIds.sort()).toEqual(["t-a", "t-b", "t-c"]);
+    expect(facts.retriedCount).toBe(0);
+  });
+
+  test("a retried-hidden log's task id still counts via its surviving run", async () => {
+    // Retried pairs share a task_id: hiding the older run must not remove
+    // the task from the anti-join input (its newest run still carries it).
+    await databaseService.writeLogPreviews({
+      "/test/logs/2024-01-01_x.json": preview({
+        task_id: "shared",
+        status: "success",
+      }),
+      "/test/logs/2024-01-02_x.json": preview({
+        task_id: "shared",
+        status: "started",
+      }),
+    });
+
+    const facts = await readSamplesLogFacts("/test/logs", "/test/logs", {
+      showRetriedLogs: false,
+    });
+
+    expect(facts.fileNames).toEqual(["/test/logs/2024-01-02_x.json"]);
+    expect(facts.taskIds).toEqual(["shared"]);
+    // The surviving run is still running.
+    expect(facts.completedCount).toBe(0);
   });
 });
 

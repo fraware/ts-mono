@@ -457,6 +457,65 @@ export const readLogsColumnFacts = async (
   };
 };
 
+/** The log-side facts the cross-log samples page needs beside its sample
+ *  rows. See {@link readSamplesLogFacts}. */
+export interface SamplesLogFacts {
+  /** In-scope log names after retried-hiding — the membership set sample
+   *  rows join against (a sample displays iff its log is here). */
+  fileNames: string[];
+  /** Distinct task_ids among `fileNames` — the eval-set anti-join input
+   *  (pending tasks are ones with no log yet). */
+  taskIds: string[];
+  /** Among `fileNames`, logs that have settled (status present and not
+   *  "started") — the progress bar's numerator. */
+  completedCount: number;
+  /** Retried runs in scope pre-hiding — drives the "Show Retried Logs"
+   *  toggle's visibility (both toggle states report the same count). */
+  retriedCount: number;
+}
+
+/**
+ * One subtree scan of the logs table producing the samples page's log-side
+ * facts: which logs' samples display (membership, with retried-hiding
+ * evaluated here so the view never re-derives the cross-row `retried`
+ * mark), and the task progress counts. The samples page has no
+ * `LogsListingData` instance — its rows come from the samples subsystem —
+ * so this is a standalone read like {@link readLogsColumnFacts}.
+ *
+ * Membership is the `scopeDir` *subtree*, matching the samples read's
+ * prefix scope. Retried marks stay group-complete under a subtree scan:
+ * grouping keys on a row's exact parent directory, and a row is under the
+ * prefix iff its parent directory is, so no group straddles the boundary.
+ */
+export const readSamplesLogFacts = async (
+  logDir: string,
+  scopeDir: string,
+  options: { showRetriedLogs: boolean }
+): Promise<SamplesLogFacts> => {
+  const scanned = await scanRows(logDir, { prefix: scopeDir });
+  const rows = computeLogsWithRetried(scanned);
+  // Re-applied per row: the cache path can serve a superset (an
+  // out-of-namespace listing arrives whole).
+  const prefix = scopePrefix(scopeDir);
+  const fileNames: string[] = [];
+  const taskIds = new Set<string>();
+  let completedCount = 0;
+  let retriedCount = 0;
+  for (const log of rows) {
+    if (!log.name.startsWith(prefix)) continue;
+    if (log.retried) {
+      retriedCount += 1;
+      if (!options.showRetriedLogs) continue;
+    }
+    fileNames.push(log.name);
+    if (log.task_id) taskIds.add(log.task_id);
+    if (log.status !== undefined && log.status !== "started") {
+      completedCount += 1;
+    }
+  }
+  return { fileNames, taskIds: [...taskIds], completedCount, retriedCount };
+};
+
 export interface LogsListingMatch {
   /** The matched record's key (`file_path`) — the view derives its display
    *  row id from it (`fileLogIdentity` is a pure function of the name). */
