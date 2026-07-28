@@ -75,9 +75,19 @@
 >   for real (with step 7).
 > - Step 7 mirror demotion — the react-query logs mirror still holds every
 >   row, so steady-state memory stays O(dir) no matter how the read path
->   paginates.
-> - The samples halves of steps 2–4: `/samples` still runs the in-memory
->   `useLogsListingQuery` over the full row list.
+>   paginates. **Now unblocked**: with the columns-schema and samples-page
+>   projections landed (below), no full-row mirror subscribers remain in
+>   db-backed sessions — the remaining `useLogs`/`getLogRows` readers
+>   resolve names only (identity tier), which is exactly the slimmed form
+>   step 7 proposes. `useLogListing` is deleted.
+> - The samples halves of steps 2–4: `/samples` sample rows still arrive as
+>   one unpaged read (`useSamplesListing`) filtered/sorted client-side in
+>   `SamplesGrid`. The *log-side* half is done: membership (subtree +
+>   retried-hiding), the eval-set anti-join task ids, and progress counts
+>   come from `readSamplesLogFacts` / `useSamplesLogFacts` — a data-layer
+>   projection, so the row-paging half no longer touches the mirror. Its
+>   hardest consumer (cross-sample prev/next from `displayedSamples`) is a
+>   jump-to-offset feature — build it on the range-driven rework.
 > - Step 5's remaining long tail: adjacent-sample nav and selected-row
 >   restore from the snapshot key list — consumers of the range-driven
 >   rework's jump-to-offset primitive.
@@ -91,9 +101,9 @@
 >   sampleLimits presence in one scan, subtree-scoped, retried runs
 >   included). Deliberately not a `LogsListingData` method — instances are
 >   constructed *with* the schema these facts produce, so the read sits
->   upstream and consumes raw records only. The list page's last full-row
->   mirror subscriber is now the samples panel (`useLogListing` in
->   `SamplesPanel`), i.e. the samples halves below.
+>   upstream and consumes raw records only. (`SamplesPanel`, the remaining
+>   full-row subscriber at the time, has since moved to
+>   `readSamplesLogFacts` — see the samples-halves bullet.)
 > - Step 6 cleanup.
 
 The `/tasks`, `/logs`, and `/samples` pages sort and filter via `Condition` /
