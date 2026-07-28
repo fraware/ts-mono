@@ -102,7 +102,9 @@ export {
   createLogsListingData,
   readLogsColumnFacts,
   readLogsOverview,
+  readSamplesLogFacts,
   type LogsColumnFacts,
+  type SamplesLogFacts,
   type LogsListingData,
   type LogsListingFindQuery,
   type LogsListingMatch,
@@ -136,7 +138,7 @@ export type {
   ValueComparator,
 } from "./listing/types";
 export { useLogHeader, useLogFetchState } from "./log";
-export { type LogListingRow, useLogListing } from "./logListing";
+export { type LogListingRow } from "./logListing";
 export { resolveLogKey } from "./logsContent";
 export { useRunningMetrics } from "./pendingSamples";
 export {
