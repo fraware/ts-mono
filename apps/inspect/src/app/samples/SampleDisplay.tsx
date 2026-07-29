@@ -964,7 +964,11 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                   backfilling={
                     backfilling ||
                     (isChunked && chunkedMessages.loading) ||
-                    messageRowsSettling
+                    messageRowsSettling ||
+                    // monolith member fetch/parse: no source can exist yet,
+                    // but the sample query is in flight (`!running` keeps the
+                    // streaming path's "Waiting for messages" affordance)
+                    (sampleData.status === "loading" && !running)
                   }
                   scrollToTopOnFinish={scrollToTopOnFinish}
                   className={styles.fullWidth}
