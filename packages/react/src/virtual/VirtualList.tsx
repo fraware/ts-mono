@@ -420,15 +420,74 @@ export function VirtualList<T>({
       let frames = 0;
       let stable = 0;
       let lastTop = el.scrollTop;
+      // Phase 1, coordinate space. A still scrollTop isn't arrival: rows
+      // measuring in after a long jump shift the layout between React
+      // commits, while rAF frames in between see no movement. Require the
+      // recomputed target offset to match the observed offset too, so the
+      // loop outlasts measurement drift (and its clamped variant: a target
+      // near the end tracks the growing max).
+      const aligned = () => {
+        const want = virtualizer.getOffsetForIndex(index, align)?.[0];
+        return (
+          want === undefined ||
+          Math.abs(want - (virtualizer.scrollOffset ?? 0)) <= 1
+        );
+      };
+      // Phase 2, DOM space. Coordinate alignment converges to a landing
+      // that's still off by (target.start − firstRendered.start)(1 − 1/scale):
+      // padding divs live in spacer space but the rendered band is 1:1, so a
+      // content offset maps to a DOM position TanStack's math doesn't see.
+      // Once the target element exists, correct against where it actually
+      // sits. The reference replicates the unscaled landing exactly:
+      // scrollTop = start − padStart puts the target at listOffset + padStart
+      // below the container top, where listOffset is the chrome above the
+      // list inside the same scroll container (TanStack's never-set
+      // scrollMargin). delta/scale is exact — a scrollTop change moves the
+      // observed content offset (and with it the band) by scale× itself.
+      let nudging = false;
+      const domDelta = () => {
+        const target = el.querySelector(`[data-index="${index}"]`);
+        // items → rendered band (position:relative) → list wrapper
+        const wrapper = target?.parentElement?.parentElement;
+        if (!target || !wrapper) return undefined;
+        const containerTop = el.getBoundingClientRect().top;
+        const listOffset =
+          wrapper.getBoundingClientRect().top - containerTop + el.scrollTop;
+        return (
+          target.getBoundingClientRect().top -
+          containerTop -
+          (listOffset + (scrollPaddingStart ?? 0))
+        );
+      };
       const settle = () => {
         if (userInteractingRef.current) {
           finish();
           return;
         }
-        jump();
-        stable = Math.abs(el.scrollTop - lastTop) <= 1 ? stable + 1 : 0;
-        lastTop = el.scrollTop;
-        if (stable < 3 && ++frames < 30) {
+        if (nudging) {
+          const delta = domDelta();
+          if (delta === undefined || Math.abs(delta) <= 2) {
+            finish();
+            return;
+          }
+          el.scrollTop += delta / scale;
+        } else {
+          jump();
+          stable = Math.abs(el.scrollTop - lastTop) <= 1 ? stable + 1 : 0;
+          lastTop = el.scrollTop;
+          if (stable >= 3 && aligned()) {
+            // Only "start" has a DOM-truth phase: it's the deep-link landing
+            // alignment, and the one whose target-at-top intent the formula
+            // above encodes.
+            if (align === "start" && domDelta() !== undefined) {
+              nudging = true;
+            } else {
+              finish();
+              return;
+            }
+          }
+        }
+        if (++frames < 150) {
           settleFrameRef.current = requestAnimationFrame(settle);
         } else {
           finish();
@@ -436,7 +495,7 @@ export function VirtualList<T>({
       };
       settleFrameRef.current = requestAnimationFrame(settle);
     },
-    [virtualizer, getScrollElement]
+    [virtualizer, getScrollElement, scale, scrollPaddingStart]
   );
   useEffect(
     () => () => {

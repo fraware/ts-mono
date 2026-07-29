@@ -110,6 +110,33 @@ export function useScaledVirtualizer(
     instance: Virtualizer<HTMLElement, Element>
   ) => item.end <= (instance.scrollOffset ?? 0);
 
+  // getMaxScrollOffset reads the DOM's scrollHeight — SPACER space — but
+  // TanStack clamps CONTENT-space scroll targets against it
+  // (getOffsetForAlignment) and compares it to the content-space observed
+  // offset (isAtEnd, iOS adjustment flush). Under scale > 1 that truncates
+  // any scrollToIndex past the spacer cap: a deep link into a capped list
+  // lands at spacerMax/scale — proportionally short. Re-report it in
+  // content space; scaledScrollToFn's division maps the clamped result
+  // back to the spacer. Private in the type (hence the cast) but, like the
+  // instance hook above, an assignable constructor-bound method. The
+  // unwrapped original is captured once per instance — re-wrapping each
+  // render would compound the multiplication.
+  const maxScrollBaseRef = useRef<{
+    instance: Virtualizer<HTMLElement, Element>;
+    base: () => number;
+  } | null>(null);
+  const withMaxScroll = virtualizer as unknown as {
+    getMaxScrollOffset: () => number;
+  };
+  if (maxScrollBaseRef.current?.instance !== virtualizer) {
+    maxScrollBaseRef.current = {
+      instance: virtualizer,
+      base: withMaxScroll.getMaxScrollOffset,
+    };
+  }
+  const maxScrollBase = maxScrollBaseRef.current.base;
+  withMaxScroll.getMaxScrollOffset = () => maxScrollBase() * scaleRef.current;
+
   const contentTotal = virtualizer.getTotalSize();
   const scale = computeScale(contentTotal, SAFE_MAX_SPACER);
   scaleRef.current = scale;
