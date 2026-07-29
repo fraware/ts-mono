@@ -16,8 +16,9 @@ import { useNavigate } from "react-router-dom";
 
 import { EvalSample, EvalSpec } from "@tsmono/inspect-common/types";
 import {
-  ChatViewVirtualList,
-  messagesToStr,
+  buildMessageRows,
+  ChatViewRowsVirtualList,
+  messageRowsModel,
 } from "@tsmono/inspect-components/chat";
 import {
   DisplayModeContext,
@@ -74,7 +75,12 @@ import {
   kSampleTranscriptTabId,
   kSampleUsageTabId,
 } from "../../constants";
-import { useChunkedMessages } from "../../log_data";
+import {
+  inMemoryMessageRows,
+  kDefaultMessageRowOptions,
+  useChunkedMessages,
+  useMessageRowsModel,
+} from "../../log_data";
 import { setDocumentTitle } from "../../state/actions";
 import {
   useSelectedEvalSampleData,
@@ -113,6 +119,8 @@ import { SearchPanelSlot } from "./transcript/search/SearchPanelSlot";
 import { useInspectSearchReferenceLabels } from "./transcript/search/useInspectSearchReferenceLabels";
 import { TranscriptFilterPopover } from "./transcript/TranscriptFilter";
 import { TranscriptPanel } from "./transcript/TranscriptPanel";
+
+const kNoMessageRows = messageRowsModel([]);
 
 interface SampleDisplayProps {
   id: string;
@@ -252,9 +260,40 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
     isChunked && messagesTabOpen ? selectedSampleHandle : undefined,
     sampleData.chunked
   );
-  const effectiveMessages = isChunked
-    ? (chunkedMessages.data ?? [])
-    : sampleMessages;
+
+  // The Messages tab's data source: settled conversations (monolith
+  // messages, hydrated chunked messages) go behind SampleMessagesData and
+  // the paged rows-model; the streaming path renders a fully-resident model
+  // over the events-derived array below (stage 1 of the seam — see
+  // SampleMessagesData).
+  const inlineMessages = sample?.messages;
+  const messagesSource = useMemo(() => {
+    if (isChunked) {
+      return chunkedMessages.data
+        ? inMemoryMessageRows(chunkedMessages.data)
+        : undefined;
+    }
+    return inlineMessages ? inMemoryMessageRows(inlineMessages) : undefined;
+  }, [isChunked, chunkedMessages.data, inlineMessages]);
+  const pagedRows = useMessageRowsModel(
+    logDir,
+    selectedSampleHandle,
+    messagesSource
+  );
+  const streamingRows = useMemo(
+    () =>
+      messagesSource === undefined
+        ? messageRowsModel(
+            buildMessageRows(sampleMessages, kDefaultMessageRowOptions)
+          )
+        : undefined,
+    [messagesSource, sampleMessages]
+  );
+  const messageRows = pagedRows ?? streamingRows ?? kNoMessageRows;
+  // A defined source whose first page hasn't landed yet (source swap, cache
+  // rendezvous) must read as loading, never as "No messages".
+  const messageRowsSettling =
+    messagesSource !== undefined && pagedRows === undefined;
 
   // Focus the panel when it loads
   useEffect(() => {
@@ -547,13 +586,16 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
           }
         },
         Messages: () => {
-          if (sample?.messages) {
+          if (messagesSource) {
             // eslint-disable-next-line @typescript-eslint/no-floating-promises
-            navigator.clipboard.writeText(messagesToStr(sample.messages));
-            setIcon(ApplicationIcons.confirm);
-            setTimeout(() => {
-              setIcon(ApplicationIcons.copy);
-            }, 1250);
+            messagesSource.exportText().then((text) => {
+              // eslint-disable-next-line @typescript-eslint/no-floating-promises
+              navigator.clipboard.writeText(text);
+              setIcon(ApplicationIcons.confirm);
+              setTimeout(() => {
+                setIcon(ApplicationIcons.copy);
+              }, 1250);
+            });
           }
         },
         Transcript: () => {
@@ -588,12 +630,14 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
             );
           },
           Messages: () => {
-            if (sample.messages && sample.messages.length > 0) {
+            if (messagesSource) {
               // eslint-disable-next-line @typescript-eslint/no-floating-promises
-              api.download_file(
-                `${sampleId}-messages.txt`,
-                messagesToStr(sample.messages)
-              );
+              messagesSource.exportText().then((text) => {
+                if (text.length > 0) {
+                  // eslint-disable-next-line @typescript-eslint/no-floating-promises
+                  api.download_file(`${sampleId}-messages.txt`, text);
+                }
+              });
             }
           },
           Transcript: () => {
@@ -904,10 +948,10 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                 panel={hasRail ? railPanel : undefined}
                 label={railLabel}
               >
-                <ChatViewVirtualList
+                <ChatViewRowsVirtualList
                   key={chatListId}
                   id={chatListId}
-                  messages={effectiveMessages}
+                  rows={messageRows}
                   initialMessageId={sampleDetailNavigation.message}
                   followRequested={sampleDetailNavigation.follow}
                   display={chatDisplay}
@@ -918,7 +962,9 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                   tools={chatTools}
                   running={running}
                   backfilling={
-                    backfilling || (isChunked && chunkedMessages.loading)
+                    backfilling ||
+                    (isChunked && chunkedMessages.loading) ||
+                    messageRowsSettling
                   }
                   scrollToTopOnFinish={scrollToTopOnFinish}
                   className={styles.fullWidth}
