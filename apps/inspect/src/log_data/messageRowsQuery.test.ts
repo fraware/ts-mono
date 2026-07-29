@@ -37,7 +37,7 @@ const wrapper = ({ children }: { children: ReactNode }) =>
 describe("useMessageRowsModel", () => {
   it("returns undefined without a source", () => {
     const { result } = renderHook(
-      () => useMessageRowsModel("dir", handle, undefined),
+      () => useMessageRowsModel(handle, undefined),
       { wrapper }
     );
     expect(result.current).toBeUndefined();
@@ -45,10 +45,9 @@ describe("useMessageRowsModel", () => {
 
   it("seeds an in-memory source fully on first render — no fetch, no placeholders", () => {
     const source = inMemoryMessageRows(makeMessages(1200));
-    const { result } = renderHook(
-      () => useMessageRowsModel("dir", handle, source),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useMessageRowsModel(handle, source), {
+      wrapper,
+    });
     const model = result.current;
     expect(model).toBeDefined();
     expect(model!.total).toBe(1200);
@@ -61,10 +60,9 @@ describe("useMessageRowsModel", () => {
 
   it("walks pages forward on requestRange for an async source", async () => {
     const source = asyncSource(makeMessages(1200));
-    const { result } = renderHook(
-      () => useMessageRowsModel("dir", handle, source),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useMessageRowsModel(handle, source), {
+      wrapper,
+    });
 
     await waitFor(() => expect(result.current).toBeDefined());
     expect(result.current!.total).toBe(1200);
@@ -88,7 +86,7 @@ describe("useMessageRowsModel", () => {
     };
     const { result, rerender } = renderHook(
       ({ source }: { source: SampleMessagesData | undefined }) =>
-        useMessageRowsModel("dir", handle, source),
+        useMessageRowsModel(handle, source),
       { wrapper, initialProps }
     );
     expect(result.current).toBeUndefined();
@@ -101,10 +99,9 @@ describe("useMessageRowsModel", () => {
 
   it("models an empty conversation as total 0, not as loading", () => {
     const source = inMemoryMessageRows([]);
-    const { result } = renderHook(
-      () => useMessageRowsModel("dir", handle, source),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useMessageRowsModel(handle, source), {
+      wrapper,
+    });
     expect(result.current).toBeDefined();
     expect(result.current!.total).toBe(0);
   });

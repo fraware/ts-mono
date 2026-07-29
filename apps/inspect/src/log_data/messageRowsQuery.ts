@@ -58,7 +58,6 @@ const seedPages = (
  * Undefined until the source exists and its first page is resident.
  */
 export const useMessageRowsModel = (
-  logDir: string,
   handle: SampleHandle | undefined,
   source: SampleMessagesData | undefined
 ): MessageRowsModel | undefined => {
@@ -66,7 +65,6 @@ export const useMessageRowsModel = (
     queryKey: [
       "log_data",
       "message-rows",
-      logDir,
       handle?.logFile ?? null,
       handle?.id ?? null,
       handle?.epoch ?? null,

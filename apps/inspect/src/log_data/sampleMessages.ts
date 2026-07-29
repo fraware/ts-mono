@@ -45,7 +45,6 @@ export interface SampleMessages {
  * before their first poll lands).
  */
 export const useSampleMessages = (
-  logDir: string,
   handle: SampleHandle | undefined,
   sampleData: EvalSampleData,
   active: boolean,
@@ -53,7 +52,6 @@ export const useSampleMessages = (
 ): SampleMessages => {
   const isChunked = sampleData.chunked !== undefined;
   const chunkedMessages = useChunkedMessages(
-    logDir,
     isChunked && active ? handle : undefined,
     sampleData.chunked
   );
@@ -67,7 +65,7 @@ export const useSampleMessages = (
     }
     return inlineMessages ? inMemoryMessageRows(inlineMessages) : undefined;
   }, [isChunked, chunkedMessages.data, inlineMessages]);
-  const pagedRows = useMessageRowsModel(logDir, handle, source);
+  const pagedRows = useMessageRowsModel(handle, source);
 
   // Streaming path: rows derived from the event stream each poll. The
   // polling pipeline only ever appends to the running events array (or

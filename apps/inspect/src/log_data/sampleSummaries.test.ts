@@ -202,7 +202,7 @@ describe("useSampleSummaries during a running eval", () => {
     };
     serverInfo = { size: 150 };
     await queryClient.refetchQueries({
-      queryKey: pendingSamplesKey(LOG_DIR, FILE),
+      queryKey: pendingSamplesKey(FILE),
     });
 
     // The flushed sample must appear alongside the buffered one — losing it
@@ -311,7 +311,7 @@ describe("useSampleSummaries during a running eval", () => {
       samples: [createSampleSummary({ id: "s2", completed: false })],
     };
     await queryClient.refetchQueries({
-      queryKey: pendingSamplesKey(LOG_DIR, FILE),
+      queryKey: pendingSamplesKey(FILE),
     });
     await waitFor(() =>
       expect(result.current.data?.map((s) => s.id)).toEqual(["s2"])
@@ -324,7 +324,7 @@ describe("useSampleSummaries during a running eval", () => {
     ]);
     serverInfo = { size: 180 };
     await queryClient.refetchQueries({
-      queryKey: pendingSamplesKey(LOG_DIR, FILE),
+      queryKey: pendingSamplesKey(FILE),
     });
 
     // The flushed sample must still arrive — without file-change-triggered

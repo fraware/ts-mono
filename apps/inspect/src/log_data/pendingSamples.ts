@@ -24,14 +24,12 @@ import { useLogHeader } from "./log";
 
 const kDefaultRefreshSeconds = 2;
 
-export const pendingSamplesKey = (
-  logDir: string,
-  logFile: string | undefined
-) => ["log_data", "pending-samples", logDir, logFile ?? null] as const;
+export const pendingSamplesKey = (logFile: string | undefined) =>
+  ["log_data", "pending-samples", logFile ?? null] as const;
 
 /**
  * A running eval's sample buffer (pending sample summaries + running metrics)
- * as a poll-driven react-query query keyed on `(logDir, logFile)`. Polling has
+ * as a poll-driven react-query query keyed on the log file. Polling has
  * no imperative start/stop: enablement derives from the log's live status,
  * cadence from the server's refresh hint, and teardown from the query key
  * changing. Each tick threads the previous data's etag, and probes the log
@@ -77,8 +75,8 @@ export const nextPendingSamples = (
   }
 };
 
-const detailsSignatureKey = (logDir: string, logFile: string) =>
-  ["log_data", "details-signature", logDir, logFile] as const;
+const detailsSignatureKey = (logFile: string) =>
+  ["log_data", "details-signature", logFile] as const;
 
 const logInfoSignature = (info: LogInfo): string =>
   `${info.size}:${info.etag ?? ""}`;
@@ -95,11 +93,10 @@ const logInfoSignature = (info: LogInfo): string =>
  */
 const refreshDetailsOnChange = async (
   api: ClientAPI,
-  logDir: string,
   logFile: string
 ): Promise<void> => {
   const signature = logInfoSignature(await api.get_log_info(logFile));
-  const key = detailsSignatureKey(logDir, logFile);
+  const key = detailsSignatureKey(logFile);
   if (queryClient.getQueryData<string>(key) === signature) {
     return;
   }
@@ -114,7 +111,6 @@ const refreshDetailsOnChange = async (
 /** One poll tick (the queryFn; exported for tests). */
 export const fetchPendingSamples = async (
   api: ClientAPI,
-  logDir: string,
   logFile: string
 ): Promise<PendingSamples | null> => {
   const getPendingSamples = api.get_log_pending_samples;
@@ -123,12 +119,12 @@ export const fetchPendingSamples = async (
   }
   const prev =
     queryClient.getQueryData<PendingSamples | null>(
-      pendingSamplesKey(logDir, logFile)
+      pendingSamplesKey(logFile)
     ) ?? null;
   const response = await getPendingSamples(logFile, prev?.etag);
   // Awaited so a NotFound tick drops the pending rows only once the fresh
   // summaries/status (which may end the poll) are in.
-  await refreshDetailsOnChange(api, logDir, logFile);
+  await refreshDetailsOnChange(api, logFile);
   return nextPendingSamples(prev, response);
 };
 
@@ -153,10 +149,8 @@ export const usePendingSamples = (
       apiSupportsPendingSamples: api.get_log_pending_samples !== undefined,
     }) && logFile !== undefined;
   const result = useAsyncDataFromQuery({
-    queryKey: pendingSamplesKey(logDir, logFile),
-    queryFn: enabled
-      ? () => fetchPendingSamples(api, logDir, logFile)
-      : skipToken,
+    queryKey: pendingSamplesKey(logFile),
+    queryFn: enabled ? () => fetchPendingSamples(api, logFile) : skipToken,
     // A failed tick retries per the client default, then parks the query in
     // error state; stopping the interval there is the give-up.
     refetchInterval: (query) =>
@@ -197,15 +191,10 @@ export const useRunningMetrics = (
 
 /**
  * Non-React snapshot of the pending samples (for the running-sample query's
- * finalize decision). Returns
- * `undefined` when there's no resolved dir.
+ * finalize decision).
  */
 export const getPendingSamples = (
-  logDir: string | undefined,
   logFile: string
 ): PendingSamples | undefined =>
-  logDir === undefined
-    ? undefined
-    : (queryClient.getQueryData<PendingSamples | null>(
-        pendingSamplesKey(logDir, logFile)
-      ) ?? undefined);
+  queryClient.getQueryData<PendingSamples | null>(pendingSamplesKey(logFile)) ??
+  undefined;

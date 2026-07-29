@@ -191,9 +191,7 @@ describe("streamRunningSampleTick", () => {
 
     const result = await streamRunningSampleTick(api, LOG_DIR, handle);
     expect(result.finalized).toBe(true);
-    const primed = queryClient.getQueryData<EvalSample>(
-      sampleQueryKey(LOG_DIR, handle)
-    );
+    const primed = queryClient.getQueryData<EvalSample>(sampleQueryKey(handle));
     expect(primed?.id).toBe("sample-1");
   });
 
@@ -206,15 +204,13 @@ describe("streamRunningSampleTick", () => {
 
     const result = await streamRunningSampleTick(api, LOG_DIR, handle);
     expect(result.finalized).toBe(false);
-    expect(
-      queryClient.getQueryData(sampleQueryKey(LOG_DIR, handle))
-    ).toBeUndefined();
+    expect(queryClient.getQueryData(sampleQueryKey(handle))).toBeUndefined();
   });
 
   it("synthesizes an errored sample from the live summary on a missing EvalSample", async () => {
     const handle = makeHandle("errored.eval");
     seedLogDetails(handle.logFile, []);
-    queryClient.setQueryData(pendingSamplesKey(LOG_DIR, handle.logFile), {
+    queryClient.setQueryData(pendingSamplesKey(handle.logFile), {
       samples: [
         { id: "sample-1", epoch: 1, error: "boom", completed: true },
       ] as unknown as SampleSummary[],
@@ -225,9 +221,7 @@ describe("streamRunningSampleTick", () => {
 
     const result = await streamRunningSampleTick(api, LOG_DIR, handle);
     expect(result.finalized).toBe(true);
-    const primed = queryClient.getQueryData<EvalSample>(
-      sampleQueryKey(LOG_DIR, handle)
-    );
+    const primed = queryClient.getQueryData<EvalSample>(sampleQueryKey(handle));
     expect(primed?.error?.message).toBe("boom");
   });
 
@@ -254,9 +248,7 @@ describe("streamRunningSampleTick", () => {
 
     const result = await streamRunningSampleTick(api, LOG_DIR, handle);
     expect(result.finalized).toBe(true);
-    expect(
-      queryClient.getQueryData(sampleQueryKey(LOG_DIR, handle))
-    ).toBeDefined();
+    expect(queryClient.getQueryData(sampleQueryKey(handle))).toBeDefined();
   });
 
   it("a key change replaces the session: fresh cursors, no leaked events", async () => {
@@ -391,22 +383,20 @@ describe("streamRunningSampleTick backfill", () => {
 });
 
 describe("runningSampleQueryKey", () => {
-  it("keys on dir, file, id and epoch", () => {
-    expect(runningSampleQueryKey(LOG_DIR, makeHandle("log.eval"))).toEqual([
+  it("keys on file, id and epoch", () => {
+    expect(runningSampleQueryKey(makeHandle("log.eval"))).toEqual([
       "log_data",
       "running-sample",
-      LOG_DIR,
       "log.eval",
       "sample-1",
       1,
     ]);
   });
 
-  it("parks idle observers on a null slot per dir", () => {
-    expect(runningSampleQueryKey(LOG_DIR, undefined)).toEqual([
+  it("parks idle observers on a null slot", () => {
+    expect(runningSampleQueryKey(undefined)).toEqual([
       "log_data",
       "running-sample",
-      LOG_DIR,
       null,
       null,
       null,

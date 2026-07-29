@@ -83,5 +83,5 @@ export const getSampleSummaries = async (
     ? []
     : mergeSampleSummaries(
         await readSettledSummaries(logDir, resolveLogKey(logDir, logFile)),
-        getPendingSamples(logDir, logFile)?.samples ?? []
+        getPendingSamples(logFile)?.samples ?? []
       );

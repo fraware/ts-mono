@@ -31,14 +31,10 @@ const kRunningSampleIntervalMs = 2_000;
 // caught up.
 const kCatchupIntervalMs = 10;
 
-export const runningSampleQueryKey = (
-  logDir: string,
-  handle: SampleHandle | undefined
-) =>
+export const runningSampleQueryKey = (handle: SampleHandle | undefined) =>
   [
     "log_data",
     "running-sample",
-    logDir,
     handle?.logFile ?? null,
     handle?.id ?? null,
     handle?.epoch ?? null,
@@ -111,12 +107,8 @@ interface StreamSlot {
 // cache entry, so it cannot corrupt the new sample's stream.
 let slot: StreamSlot | undefined;
 
-const slotFor = (
-  api: ClientAPI,
-  logDir: string,
-  handle: SampleHandle
-): StreamSlot => {
-  const key = JSON.stringify(runningSampleQueryKey(logDir, handle));
+const slotFor = (api: ClientAPI, handle: SampleHandle): StreamSlot => {
+  const key = JSON.stringify(runningSampleQueryKey(handle));
   if (slot?.key !== key) {
     slot = {
       key,
@@ -181,7 +173,7 @@ const finalizeRunningSample = async (
       handle.id,
       handle.epoch
     );
-    queryClient.setQueryData(sampleQueryKey(logDir, handle), sample);
+    queryClient.setQueryData(sampleQueryKey(handle), sample);
     return true;
   } catch (error) {
     if (bufferComplete) {
@@ -191,7 +183,7 @@ const finalizeRunningSample = async (
       const summary = await findLiveSummary(logDir, handle);
       if (summary?.error) {
         queryClient.setQueryData(
-          sampleQueryKey(logDir, handle),
+          sampleQueryKey(handle),
           synthesizeErroredSampleFromSummary(summary)
         );
         return true;
@@ -207,7 +199,7 @@ export const streamRunningSampleTick = async (
   logDir: string,
   handle: SampleHandle
 ): Promise<RunningSampleData> => {
-  const streamSlot = slotFor(api, logDir, handle);
+  const streamSlot = slotFor(api, handle);
   const tick = await streamSlot.session.tick(
     await hasCompletedLogSummary(logDir, handle)
   );
@@ -250,7 +242,7 @@ export const streamRunningSampleTick = async (
 
 /**
  * Poll-driven incremental query over a running sample's event stream, keyed
- * `["log_data", "running-sample", logDir, logFile, id, epoch]`. Nothing imperative:
+ * `["log_data", "running-sample", logFile, id, epoch]`. Nothing imperative:
  * enablement derives from the summary and the log's live status
  * (`shouldStreamRunningSample`), cadence is a 2s `refetchInterval` (dropping
  * to near-immediate while the initial backlog drains — see `catchup`), and
@@ -273,7 +265,7 @@ export const useRunningSample = (
     logStatus,
   });
   return useAsyncDataFromQuery({
-    queryKey: runningSampleQueryKey(logDir, handle),
+    queryKey: runningSampleQueryKey(handle),
     queryFn:
       enabled && handle !== undefined
         ? () => streamRunningSampleTick(getApi(), logDir, handle)
