@@ -917,7 +917,9 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                   scrollRef={scrollRef}
                   tools={chatTools}
                   running={running}
-                  backfilling={backfilling}
+                  backfilling={
+                    backfilling || (isChunked && chunkedMessages.loading)
+                  }
                   scrollToTopOnFinish={scrollToTopOnFinish}
                   className={styles.fullWidth}
                 />
