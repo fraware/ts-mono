@@ -14,7 +14,7 @@ import {
   kDefaultMessageRowOptions,
   type SampleMessagesData,
 } from "./messageRows";
-import { useMessageRowsModel } from "./messageRowsQuery";
+import { useMessageRowsModel, useMessageRowTarget } from "./messageRowsQuery";
 import {
   messagesFromEvents,
   type MessagesFromEventsState,
@@ -33,6 +33,12 @@ export interface SampleMessages {
   /** The settled conversation's source — `exportText` backs copy/download.
    *  Undefined while loading and on the streaming path. */
   source: SampleMessagesData | undefined;
+  /** Row position of the `?message=` deep-link target, resolved by the
+   *  active source with its covering pages pre-loaded — undefined while
+   *  resolving (folded into `loading`), for unknown ids, and on the
+   *  streaming path (whose rows are fully resident; the view's own scan
+   *  handles it). */
+  initialRowIndex: number | undefined;
 }
 
 /**
@@ -48,7 +54,8 @@ export const useSampleMessages = (
   handle: SampleHandle | undefined,
   sampleData: EvalSampleData,
   active: boolean,
-  running: boolean
+  running: boolean,
+  initialMessageId?: string | null
 ): SampleMessages => {
   const chunked = sampleData.chunked;
 
@@ -78,7 +85,16 @@ export const useSampleMessages = (
     }
     return inlineMessages ? inMemoryMessageRows(inlineMessages) : undefined;
   }, [chunked, activated, inlineMessages]);
-  const pagedRows = useMessageRowsModel(handle, source);
+
+  // Deep-link resolution runs before the rows query sees the source: the
+  // gate is what lets the target's page prefix land race-free, and the
+  // list then mounts with the target row resident (VirtualList honors
+  // initialIndex only at mount).
+  const target = useMessageRowTarget(handle, source, initialMessageId);
+  const pagedRows = useMessageRowsModel(
+    handle,
+    target.pending ? undefined : source
+  );
 
   // Streaming path: rows derived from the event stream each poll. The
   // polling pipeline only ever appends to the running events array (or
@@ -118,5 +134,6 @@ export const useSampleMessages = (
     rows: pagedRows ?? streamingRows ?? kNoRows,
     loading,
     source,
+    initialRowIndex: target.index,
   };
 };

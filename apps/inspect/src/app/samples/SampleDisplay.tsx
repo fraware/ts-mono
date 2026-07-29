@@ -229,11 +229,13 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
     (state) => state.log.selectedSampleHandle
   );
   const messagesTabOpen = effectiveSelectedTab === kSampleMessagesTabId;
+  const sampleDetailNavigation = useSampleDetailNavigation();
   const sampleMessages = useSampleMessages(
     selectedSampleHandle,
     sampleData,
     messagesTabOpen,
-    running
+    running,
+    sampleDetailNavigation.message
   );
 
   // Focus the panel when it loads
@@ -620,8 +622,6 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
     logDetails?.status !== "error" &&
     logDetails?.status !== "cancelled";
 
-  const sampleDetailNavigation = useSampleDetailNavigation();
-
   const displayModeContext = useMemo(
     () => ({ displayMode: displayMode ?? ("rendered" as const) }),
     [displayMode]
@@ -885,6 +885,7 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                   id={chatListId}
                   rows={sampleMessages.rows}
                   initialMessageId={sampleDetailNavigation.message}
+                  initialRowIndex={sampleMessages.initialRowIndex}
                   followRequested={sampleDetailNavigation.follow}
                   display={chatDisplay}
                   labels={messagesSearchLabels}
