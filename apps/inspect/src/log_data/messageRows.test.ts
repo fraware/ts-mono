@@ -14,7 +14,7 @@ import {
   type MessageRowsPage,
 } from "./messageRows";
 
-const messages = [
+const messages: ChatMessage[] = [
   { id: "sys-1", role: "system", content: "be helpful" },
   { id: "u-1", role: "user", content: "hi" },
   {
@@ -22,14 +22,14 @@ const messages = [
     role: "assistant",
     content: "",
     tool_calls: [
-      { id: "c-1", function: "bash", arguments: {} },
-      { id: "c-2", function: "python", arguments: {} },
+      { id: "c-1", function: "bash", arguments: {}, type: "function" },
+      { id: "c-2", function: "python", arguments: {}, type: "function" },
     ],
   },
   { id: "t-1", role: "tool", content: "ok", tool_call_id: "c-1" },
   { id: "t-2", role: "tool", content: "ok", tool_call_id: "c-2" },
   { id: "a-2", role: "assistant", content: "done" },
-] as unknown as ChatMessage[];
+];
 
 const forward = (position: number | undefined, limit: number): Pagination => ({
   cursor: position === undefined ? null : { position },
@@ -37,10 +37,7 @@ const forward = (position: number | undefined, limit: number): Pagination => ({
   limit,
 });
 
-const backward = (
-  position: number | undefined,
-  limit: number
-): Pagination => ({
+const backward = (position: number | undefined, limit: number): Pagination => ({
   cursor: position === undefined ? null : { position },
   direction: "backward",
   limit,

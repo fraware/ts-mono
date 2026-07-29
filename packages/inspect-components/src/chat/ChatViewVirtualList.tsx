@@ -138,9 +138,7 @@ export const ChatViewRowsVirtualList: FC<ChatViewRowsVirtualListProps> = memo(
     // Keep asking the model for the rows under the viewport: re-request on
     // scroll (the range callback) and whenever the model changes (loaded
     // pages arriving move the "what's still missing" answer).
-    const visibleRangeRef = useRef<{ start: number; end: number } | null>(
-      null
-    );
+    const visibleRangeRef = useRef<{ start: number; end: number } | null>(null);
     const requestVisible = useCallback(() => {
       const range = visibleRangeRef.current;
       if (range) {

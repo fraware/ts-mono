@@ -7,10 +7,7 @@ import { ChatMessage } from "@tsmono/inspect-common/types";
 
 import { SampleHandle } from "../app/types";
 
-import {
-  inMemoryMessageRows,
-  type SampleMessagesData,
-} from "./messageRows";
+import { inMemoryMessageRows, type SampleMessagesData } from "./messageRows";
 import { useMessageRowsModel } from "./messageRowsQuery";
 
 const handle: SampleHandle = { logFile: "log.eval", id: "s1", epoch: 1 };
@@ -35,11 +32,7 @@ const asyncSource = (messages: ChatMessage[]): SampleMessagesData => {
 };
 
 const wrapper = ({ children }: { children: ReactNode }) =>
-  createElement(
-    QueryClientProvider,
-    { client: new QueryClient() },
-    children
-  );
+  createElement(QueryClientProvider, { client: new QueryClient() }, children);
 
 describe("useMessageRowsModel", () => {
   it("returns undefined without a source", () => {

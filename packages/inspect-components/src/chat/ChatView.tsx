@@ -5,9 +5,9 @@ import type { ChatMessage as ChatMessageType } from "@tsmono/inspect-common/type
 import type { MarkdownReference } from "@tsmono/react/components";
 
 import { ChatMessageRow } from "./ChatMessageRow";
-import { countRowBlocks } from "./rowsModel";
 import { computeMaxLabelLength } from "./labelLength";
 import { resolveMessages } from "./messages";
+import { countRowBlocks } from "./rowsModel";
 import {
   ChatViewDisplayOptions,
   ChatViewLabelOptions,
