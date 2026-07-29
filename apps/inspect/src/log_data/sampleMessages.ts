@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import {
   buildMessageRows,
@@ -8,7 +8,7 @@ import {
 
 import { SampleHandle } from "../app/types";
 
-import { useChunkedMessages } from "./chunkedMessages";
+import { chunkedMessageRows } from "./chunkedMessageRows";
 import {
   inMemoryMessageRows,
   kDefaultMessageRowOptions,
@@ -27,7 +27,7 @@ export interface SampleMessages {
   /** The rows-model the Messages tab renders. */
   rows: MessageRowsModel;
   /** Data that will produce messages is still in flight (monolith sample
-   *  fetch, chunked hydration, first page settling) — render a loading
+   *  fetch, chunked index build, first page settling) — render a loading
    *  affordance, never "No messages". */
   loading: boolean;
   /** The settled conversation's source — `exportText` backs copy/download.
@@ -37,12 +37,12 @@ export interface SampleMessages {
 
 /**
  * The Messages tab's one entry point: which feed serves the conversation —
- * completed monolith messages, a hydrated chunked sample, or the live
+ * completed monolith messages, a windowed chunked source, or the live
  * event stream — is selected here, behind the SampleMessagesData seam.
  * The view consumes rows and reports two gates it owns: `active` (the tab
- * is open — full hydration of a chunked monster is never paid at sample
- * open) and `running` (live samples surface "waiting", not "loading",
- * before their first poll lands).
+ * is open — a chunked sample's index scan is never paid at sample open)
+ * and `running` (live samples surface "waiting", not "loading", before
+ * their first poll lands).
  */
 export const useSampleMessages = (
   handle: SampleHandle | undefined,
@@ -50,21 +50,34 @@ export const useSampleMessages = (
   active: boolean,
   running: boolean
 ): SampleMessages => {
-  const isChunked = sampleData.chunked !== undefined;
-  const chunkedMessages = useChunkedMessages(
-    isChunked && active ? handle : undefined,
-    sampleData.chunked
-  );
+  const chunked = sampleData.chunked;
+
+  // The chunked source activates on first tab open — its index build
+  // (a scan of the message chunks) is never paid at sample open — and
+  // then LATCHES for the rest of the sample visit: recreating the source
+  // on a later tab switch would rebuild the index. Render-time setState
+  // is the sanctioned derive-from-previous pattern.
+  const handleKey = `${handle?.logFile}::${handle?.id}::${handle?.epoch}`;
+  const [activation, setActivation] = useState({ key: handleKey, on: active });
+  const nextActivation = {
+    key: handleKey,
+    on: activation.key === handleKey ? activation.on || active : active,
+  };
+  if (
+    nextActivation.key !== activation.key ||
+    nextActivation.on !== activation.on
+  ) {
+    setActivation(nextActivation);
+  }
+  const activated = nextActivation.on;
 
   const inlineMessages = sampleData.sample?.messages;
   const source = useMemo(() => {
-    if (isChunked) {
-      return chunkedMessages.data
-        ? inMemoryMessageRows(chunkedMessages.data)
-        : undefined;
+    if (chunked) {
+      return activated ? chunkedMessageRows(chunked) : undefined;
     }
     return inlineMessages ? inMemoryMessageRows(inlineMessages) : undefined;
-  }, [isChunked, chunkedMessages.data, inlineMessages]);
+  }, [chunked, activated, inlineMessages]);
   const pagedRows = useMessageRowsModel(handle, source);
 
   // Streaming path: rows derived from the event stream each poll. The
@@ -94,10 +107,9 @@ export const useSampleMessages = (
   }, [source, runningEvents]);
 
   const loading =
-    // a created source whose first page hasn't landed (cache rendezvous)
+    // a created source whose first page hasn't landed — covers the chunked
+    // index build and page materialization as well as cache rendezvous
     (source !== undefined && pagedRows === undefined) ||
-    // chunked hydration in flight
-    (isChunked && chunkedMessages.loading) ||
     // monolith member fetch/parse (`running` keeps the streaming path's
     // pre-first-poll state on its "waiting" affordance instead)
     (sampleData.status === "loading" && !running);
