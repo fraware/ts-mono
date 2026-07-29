@@ -71,6 +71,11 @@ export interface ChatViewRowsVirtualListProps {
   rows: MessageRowsModel;
   className?: string | string[];
   initialMessageId?: string | null;
+  /** Externally resolved row position for the `initialMessageId` deep link.
+   *  The in-component scan only sees loaded rows, so hosts with windowed
+   *  models resolve the position in their data layer and pass it here;
+   *  when set it takes precedence over the scan. */
+  initialRowIndex?: number;
   /** Explicit `follow=1` URL param: arm live-tail at mount even on a
    *  `?message=` landing, matching the transcript tab. */
   followRequested?: boolean;
@@ -99,6 +104,7 @@ export const ChatViewRowsVirtualList: FC<ChatViewRowsVirtualListProps> = memo(
     id,
     rows,
     initialMessageId,
+    initialRowIndex,
     followRequested,
     className,
     scrollRef,
@@ -157,6 +163,9 @@ export const ChatViewRowsVirtualList: FC<ChatViewRowsVirtualListProps> = memo(
     }, [requestVisible]);
 
     const initialMessageIndex = useMemo(() => {
+      if (initialRowIndex !== undefined) {
+        return initialRowIndex;
+      }
       if (initialMessageId === null || initialMessageId === undefined) {
         return undefined;
       }
@@ -177,7 +186,7 @@ export const ChatViewRowsVirtualList: FC<ChatViewRowsVirtualListProps> = memo(
         }
       });
       return index !== -1 ? index : undefined;
-    }, [initialMessageId, slots]);
+    }, [initialRowIndex, initialMessageId, slots]);
 
     const maxLabelLength = useMemo(
       () => computeMaxLabelLength(labels?.messageLabels),
