@@ -4,7 +4,8 @@ import { FC, useMemo } from "react";
 import type { ChatMessage as ChatMessageType } from "@tsmono/inspect-common/types";
 import type { MarkdownReference } from "@tsmono/react/components";
 
-import { ChatMessageRow, countRowBlocks } from "./ChatMessageRow";
+import { ChatMessageRow } from "./ChatMessageRow";
+import { countRowBlocks } from "./rowsModel";
 import { computeMaxLabelLength } from "./labelLength";
 import { resolveMessages } from "./messages";
 import {

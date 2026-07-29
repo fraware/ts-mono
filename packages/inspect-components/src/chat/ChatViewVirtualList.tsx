@@ -27,11 +27,16 @@ import {
 } from "../indicators/livePlaceholder";
 import { LoadingEventsIndicator } from "../indicators/LoadingEventsIndicator";
 
-import { ChatMessageRow, countRowBlocks } from "./ChatMessageRow";
+import { ChatMessageRow } from "./ChatMessageRow";
 import styles from "./ChatViewVirtualList.module.css";
 import { computeMaxLabelLength } from "./labelLength";
-import { ResolvedMessage, resolveMessages } from "./messages";
 import { messageSearchText } from "./messageSearchText";
+import {
+  buildMessageRows,
+  messageRowsModel,
+  type MessageRow,
+  type MessageRowsModel,
+} from "./rowsModel";
 import {
   ChatViewDisplayOptions,
   ChatViewLabelOptions,
@@ -61,9 +66,9 @@ const chatComponents = { Item: ChatItem };
 // Empirically tuned, sign-inverted vs naive TanStack math; don't "fix" without re-verifying against both chat and transcript surfaces.
 const kChatScrollPaddingStart = -15;
 
-export interface ChatViewVirtualListProps {
+export interface ChatViewRowsVirtualListProps {
   id: string;
-  messages: ChatMessage[];
+  rows: MessageRowsModel;
   className?: string | string[];
   initialMessageId?: string | null;
   /** Explicit `follow=1` URL param: arm live-tail at mount even on a
@@ -83,10 +88,16 @@ export interface ChatViewVirtualListProps {
   tools?: ChatViewToolOptions;
 }
 
-export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
-  function ChatViewVirtualList({
+/**
+ * The chat list over a MessageRowsModel: rows render when loaded, unloaded
+ * indexes render as placeholders while the model is asked to load the
+ * visible range. A fully-resident model (the array wrapper below, every
+ * legacy path) never shows a placeholder.
+ */
+export const ChatViewRowsVirtualList: FC<ChatViewRowsVirtualListProps> = memo(
+  function ChatViewRowsVirtualList({
     id,
-    messages,
+    rows,
     initialMessageId,
     followRequested,
     className,
@@ -99,7 +110,7 @@ export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
     labels,
     linking,
     tools,
-  }: ChatViewVirtualListProps) {
+  }: ChatViewRowsVirtualListProps) {
     const listHandle = useRef<VirtualListHandle>(null);
 
     // Frozen at mount, mirroring TranscriptViewNodes: a ?message= landing owns
@@ -113,60 +124,78 @@ export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
     useListKeyboardNavigation({
       listHandle,
       scrollRef,
-      itemCount: messages.length,
+      itemCount: rows.total,
     });
 
-    const resolveInto = tools?.collapseToolMessages ?? true;
-    const collapsedMessages = useMemo(() => {
-      return resolveInto
-        ? resolveMessages(messages)
-        : messages.map((msg) => ({
-            message: msg,
-            toolMessages: [],
-          }));
-    }, [resolveInto, messages]);
+    const slots = useMemo(() => {
+      const result = new Array<MessageRow | undefined>(rows.total);
+      for (let i = 0; i < rows.total; i++) {
+        result[i] = rows.rowAt(i);
+      }
+      return result;
+    }, [rows]);
+
+    // Keep asking the model for the rows under the viewport: re-request on
+    // scroll (the range callback) and whenever the model changes (loaded
+    // pages arriving move the "what's still missing" answer).
+    const visibleRangeRef = useRef<{ start: number; end: number } | null>(
+      null
+    );
+    const requestVisible = useCallback(() => {
+      const range = visibleRangeRef.current;
+      if (range) {
+        rows.requestRange(range.start, range.end);
+      }
+    }, [rows]);
+    const handleVisibleRangeChange = useCallback(
+      ({ startIndex, endIndex }: { startIndex: number; endIndex: number }) => {
+        visibleRangeRef.current = { start: startIndex, end: endIndex + 1 };
+        requestVisible();
+      },
+      [requestVisible]
+    );
+    useEffect(() => {
+      requestVisible();
+    }, [requestVisible]);
 
     const initialMessageIndex = useMemo(() => {
       if (initialMessageId === null || initialMessageId === undefined) {
         return undefined;
       }
 
-      const index = collapsedMessages.findIndex((message) => {
-        const messageId = message.message.id === initialMessageId;
+      const index = slots.findIndex((row) => {
+        if (row === undefined) {
+          return false;
+        }
+        const messageId = row.resolved.message.id === initialMessageId;
         if (messageId) {
           return true;
         }
 
-        if (message.toolMessages.find((tm) => tm.id === initialMessageId)) {
+        if (
+          row.resolved.toolMessages.find((tm) => tm.id === initialMessageId)
+        ) {
           return true;
         }
       });
       return index !== -1 ? index : undefined;
-    }, [initialMessageId, collapsedMessages]);
+    }, [initialMessageId, slots]);
 
     const maxLabelLength = useMemo(
       () => computeMaxLabelLength(labels?.messageLabels),
       [labels?.messageLabels]
     );
 
-    const toolCallStyle = tools?.callStyle ?? "complete";
-    const rowStartNumbers = useMemo(() => {
-      const starts: number[] = [];
-      let next = 1;
-      for (const msg of collapsedMessages) {
-        starts.push(next);
-        next += countRowBlocks(msg, toolCallStyle);
-      }
-      return starts;
-    }, [collapsedMessages, toolCallStyle]);
-
-    const lastIndex = collapsedMessages.length - 1;
+    const lastIndex = rows.total - 1;
     const renderRow = useCallback(
-      (index: number, item: ResolvedMessage): ReactNode => {
+      (index: number, item: MessageRow | undefined): ReactNode => {
+        if (item === undefined) {
+          return <div className={styles.placeholder} />;
+        }
         if (
           running &&
           index === lastIndex &&
-          isLivePlaceholderMessage(item.message)
+          isLivePlaceholderMessage(item.resolved.message)
         ) {
           return (
             <div className={styles.generatingRow}>
@@ -181,19 +210,22 @@ export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
         const toolExecuting =
           running &&
           index === lastIndex &&
-          isToolExecutingMessage(item.message, item.toolMessages.length);
+          isToolExecutingMessage(
+            item.resolved.message,
+            item.resolved.toolMessages.length
+          );
         return (
           <>
             <ChatMessageRow
               index={index}
               parentName={id || "chat-virtual-list"}
-              resolvedMessage={item}
+              resolvedMessage={item.resolved}
               display={display}
               labels={labels}
               linking={linking}
               tools={tools}
               maxLabelLength={maxLabelLength}
-              startNumber={rowStartNumbers[index]}
+              startNumber={item.startNumber}
             />
             {toolExecuting ? (
               <div className={styles.generatingRow}>
@@ -217,15 +249,20 @@ export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
         linking,
         tools,
         maxLabelLength,
-        rowStartNumbers,
       ]
+    );
+
+    const rowSearchText = useCallback(
+      (item: MessageRow | undefined): string | string[] =>
+        item === undefined ? "" : messageSearchText(item.resolved),
+      []
     );
 
     // Show a placeholder instead of a blank tab when there's nothing to
     // render: a running sample may have no messages yet (before its first
     // message event arrives), and a finished one may be empty (e.g. an early
     // error, or messages cleared due to size limits).
-    if (collapsedMessages.length === 0) {
+    if (rows.total === 0) {
       if (backfilling) {
         return <LoadingEventsIndicator label="Loading messages" />;
       }
@@ -237,12 +274,12 @@ export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
     }
 
     return (
-      <VirtualList<ResolvedMessage>
+      <VirtualList<MessageRow | undefined>
         persistenceKey={`chat-${id}`}
         ref={listHandle}
         className={clsx(styles.list, className)}
         scrollRef={scrollRef}
-        data={collapsedMessages}
+        data={slots}
         renderRow={renderRow}
         initialIndex={initialMessageIndex}
         scrollPaddingStart={kChatScrollPaddingStart}
@@ -252,8 +289,48 @@ export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
         scrollToTopOnFinish={scrollToTopOnFinish}
         components={chatComponents}
         smoothScroll={false}
-        itemSearchText={messageSearchText}
+        itemSearchText={rowSearchText}
+        onVisibleRangeChange={handleVisibleRangeChange}
       />
     );
+  }
+);
+
+export interface ChatViewVirtualListProps {
+  id: string;
+  messages: ChatMessage[];
+  className?: string | string[];
+  initialMessageId?: string | null;
+  /** Explicit `follow=1` URL param: arm live-tail at mount even on a
+   *  `?message=` landing, matching the transcript tab. */
+  followRequested?: boolean;
+  scrollRef?: RefObject<HTMLDivElement | null>;
+  running?: boolean;
+  backfilling?: boolean;
+  /** Whether a live→finished transition may scroll the view to the top.
+   *  Hosts pass false for unsuccessful finishes (error/cancelled): the
+   *  error panel renders at the bottom, where the user is looking. */
+  scrollToTopOnFinish?: boolean;
+  onNativeFindChanged?: (nativeFind: boolean) => void;
+  display?: ChatViewDisplayOptions;
+  labels?: ChatViewLabelOptions;
+  linking?: ChatViewLinkingOptions;
+  tools?: ChatViewToolOptions;
+}
+
+/** The chat list over an in-memory message array (fully resident model). */
+export const ChatViewVirtualList: FC<ChatViewVirtualListProps> = memo(
+  function ChatViewVirtualList({ messages, tools, ...rest }) {
+    const rows = useMemo(
+      () =>
+        messageRowsModel(
+          buildMessageRows(messages, {
+            toolCallStyle: tools?.callStyle ?? "complete",
+            collapseToolMessages: tools?.collapseToolMessages ?? true,
+          })
+        ),
+      [messages, tools?.callStyle, tools?.collapseToolMessages]
+    );
+    return <ChatViewRowsVirtualList rows={rows} tools={tools} {...rest} />;
   }
 );

@@ -4,6 +4,16 @@
   padding-bottom: 0.5rem;
 }
 
+/* Unloaded row slot: approximates a message card while its page loads so
+   the scrollbar doesn't jump when the real row replaces it. */
+.placeholder {
+  min-height: 3.5em;
+  margin-bottom: 0.75rem;
+  border-radius: var(--bs-border-radius, 4px);
+  background-color: var(--bs-secondary-bg, #f0f0f0);
+  opacity: 0.4;
+}
+
 .generatingRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
