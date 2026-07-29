@@ -9,7 +9,11 @@ export type {
 } from "./types";
 
 export type { Message, ResolvedMessage } from "./messages";
-export { resolveMessages } from "./messages";
+export {
+  collapsedSystemRow,
+  kCollapsedSystemMessageId,
+  resolveMessages,
+} from "./messages";
 
 export type {
   MessageRow,

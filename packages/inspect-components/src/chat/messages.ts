@@ -80,7 +80,27 @@ export const resolveMessages = (messages: ChatMessage[]): ResolvedMessage[] => {
       return resolved.message.role !== "system";
     });
 
-  // Collapse system messages
+  // Converge them
+  const systemRow = collapsedSystemRow(systemMessages);
+  if (systemRow) {
+    collapsedMessages.unshift(systemRow);
+  }
+  return collapsedMessages;
+};
+
+/** The id of the synthetic row that heads a resolved conversation with
+ * system messages (they collapse into it). */
+export const kCollapsedSystemMessageId = "sys-message-6815A84B062A";
+
+/**
+ * Collapse system messages into the single synthetic row that heads the
+ * resolved conversation — undefined when nothing collapses. Extracted so
+ * windowed sources materialize the row through the same code
+ * `resolveMessages` uses.
+ */
+export const collapsedSystemRow = (
+  systemMessages: ChatMessageSystem[]
+): ResolvedMessage | undefined => {
   const systemContent: (
     | ContentText
     | ContentImage
@@ -98,19 +118,19 @@ export const resolveMessages = (messages: ChatMessage[]): ResolvedMessage[] => {
     systemContent.push(...contents.map(normalizeContent));
   }
 
-  const systemMessage: ChatMessageSystem = {
-    id: "sys-message-6815A84B062A",
-    role: "system",
-    content: systemContent,
-    source: "input",
-    metadata: null,
-  };
-
-  // Converge them
-  if (systemMessage && systemMessage.content.length > 0) {
-    collapsedMessages.unshift({ message: systemMessage, toolMessages: [] });
+  if (systemContent.length === 0) {
+    return undefined;
   }
-  return collapsedMessages;
+  return {
+    message: {
+      id: kCollapsedSystemMessageId,
+      role: "system",
+      content: systemContent,
+      source: "input",
+      metadata: null,
+    },
+    toolMessages: [],
+  };
 };
 
 /**
