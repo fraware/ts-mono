@@ -417,77 +417,137 @@ export function VirtualList<T>({
         return;
       }
       cancelAnimationFrame(settleFrameRef.current);
-      let frames = 0;
+      const startedAt = performance.now();
       let stable = 0;
       let lastTop = el.scrollTop;
-      // Phase 1, coordinate space. A still scrollTop isn't arrival: rows
-      // measuring in after a long jump shift the layout between React
-      // commits, while rAF frames in between see no movement. Require the
-      // recomputed target offset to match the observed offset too, so the
-      // loop outlasts measurement drift (and its clamped variant: a target
-      // near the end tracks the growing max).
-      const aligned = () => {
-        const want = virtualizer.getOffsetForIndex(index, align)?.[0];
-        return (
-          want === undefined ||
-          Math.abs(want - (virtualizer.scrollOffset ?? 0)) <= 1
+      let quiet = 0;
+      let lastTargetTop: number | null = null;
+      let budget = 3;
+      let baseline: number | null = null;
+      let pendingUndo: number | null = null;
+      // "start" (the deep-link landing) anchors on the DOM as soon as the
+      // target element renders: jump() places the window, then per-frame
+      // corrections pin the target where it should sit while everything
+      // else settles around it. Re-jumping instead would teleport the
+      // viewport on every measurement commit (each landing renders fresh
+      // rows whose measurements move the coordinates again — a visible
+      // shake that can run for seconds on a big list), and under
+      // coordinate scaling the coordinate fixpoint is wrong anyway: padding
+      // divs live in spacer space but the rendered band is 1:1, leaving a
+      // (target.start − firstRendered.start)(1 − 1/scale) DOM error that
+      // TanStack's math can't see.
+      //
+      // The anchor reference is layout truth, not coordinates: the target
+      // belongs just below whatever sticky chrome overlays the container
+      // top. Probed with elementFromPoint (re-probed every frame — the
+      // host's chrome can transition during the landing, e.g. a summary
+      // header collapsing) because VirtualList can't know the host's
+      // chrome, and coordinate-derived references count only static
+      // content, not sticky overlays.
+      const visibleTop = (wrapper: Element): number => {
+        const rect = el.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const yEnd = Math.min(
+          rect.top + Math.min(rect.height, 400),
+          window.innerHeight - 1
         );
+        for (let y = Math.max(rect.top, 0) + 1; y < yEnd; y += 8) {
+          const hit = document.elementFromPoint(x, y);
+          if (hit && wrapper.contains(hit)) return y;
+        }
+        return rect.top;
       };
-      // Phase 2, DOM space. Coordinate alignment converges to a landing
-      // that's still off by (target.start − firstRendered.start)(1 − 1/scale):
-      // padding divs live in spacer space but the rendered band is 1:1, so a
-      // content offset maps to a DOM position TanStack's math doesn't see.
-      // Once the target element exists, correct against where it actually
-      // sits. The reference replicates the unscaled landing exactly:
-      // scrollTop = start − padStart puts the target at listOffset + padStart
-      // below the container top, where listOffset is the chrome above the
-      // list inside the same scroll container (TanStack's never-set
-      // scrollMargin). delta/scale is exact — a scrollTop change moves the
-      // observed content offset (and with it the band) by scale× itself.
-      let nudging = false;
-      const domDelta = () => {
+      const measureTarget = () => {
         const target = el.querySelector(`[data-index="${index}"]`);
         // items → rendered band (position:relative) → list wrapper
         const wrapper = target?.parentElement?.parentElement;
         if (!target || !wrapper) return undefined;
-        const containerTop = el.getBoundingClientRect().top;
-        const listOffset =
-          wrapper.getBoundingClientRect().top - containerTop + el.scrollTop;
-        return (
-          target.getBoundingClientRect().top -
-          containerTop -
-          (listOffset + (scrollPaddingStart ?? 0))
-        );
+        const targetTop = target.getBoundingClientRect().top;
+        return {
+          targetTop,
+          delta: targetTop - (visibleTop(wrapper) + (scrollPaddingStart ?? 0)),
+        };
       };
+      // Non-"start" jumps (keyboard nav's short hops) keep the legacy
+      // still-scrollTop settle; their coordinate error is band-local and
+      // the anchor reference encodes target-at-top intent only.
       const settle = () => {
         if (userInteractingRef.current) {
           finish();
           return;
         }
-        if (nudging) {
-          const delta = domDelta();
-          if (delta === undefined || Math.abs(delta) <= 2) {
-            finish();
-            return;
+        const measured = align === "start" ? measureTarget() : undefined;
+        if (measured !== undefined) {
+          // Take over from TanStack's own reconcile loop: scrollToIndex
+          // leaves a pending scrollState that re-asserts the coordinate-
+          // space target every frame (for up to 5s), which under scaling
+          // disagrees with the DOM anchor by the band error — two dueling
+          // writers oscillate visibly. Private field, same instance-cast
+          // posture as the scaled virtualizer's overrides.
+          (virtualizer as unknown as { scrollState: unknown }).scrollState =
+            null;
+          // Measure–settle–correct, with a bounded budget. A scrollTop
+          // change of c ultimately moves the target by ~c·scale (the
+          // immediate scroll is 1:1; TanStack's re-window at the scaled
+          // observed offset adds the rest), so the step is delta/scale and
+          // corrections only fire from QUIET — scrollTop and target both
+          // still for 3 frames — letting each one's full effect land
+          // before the next measures.
+          //
+          // Exactness is NOT achievable in general: scrollTop → targetTop
+          // is discontinuous under scaling (the band displaces by
+          // rowHeight·(1 − 1/scale) whenever the window's first item
+          // changes), so positions near the ideal are quantized and a
+          // tight tolerance hunts forever between two stable spots. Hence:
+          // row-scale tolerance, undo-and-stop when a correction makes
+          // things worse (a quantization boundary), and a re-arm only on a
+          // large external shift (e.g. the host's header collapsing after
+          // the landing).
+          const still =
+            Math.abs(el.scrollTop - lastTop) <= 1 &&
+            lastTargetTop !== null &&
+            Math.abs(measured.targetTop - lastTargetTop) <= 1;
+          lastTop = el.scrollTop;
+          lastTargetTop = measured.targetTop;
+          quiet = still ? quiet + 1 : 0;
+          if (quiet >= 3) {
+            const dist = Math.abs(measured.delta);
+            if (baseline !== null && dist > baseline + 100) {
+              budget = 3;
+              pendingUndo = null;
+            }
+            if (pendingUndo !== null) {
+              const step = pendingUndo;
+              pendingUndo = null;
+              if (baseline !== null && dist >= baseline - 4) {
+                el.scrollTop -= step;
+                budget = 0;
+                baseline = dist;
+                quiet = 0;
+              }
+            }
+            if (quiet >= 3) {
+              if (budget > 0 && dist > 8) {
+                baseline = dist;
+                pendingUndo = measured.delta / scale;
+                el.scrollTop += pendingUndo;
+                budget--;
+                quiet = 0;
+              } else {
+                baseline = dist;
+              }
+            }
           }
-          el.scrollTop += delta / scale;
         } else {
           jump();
           stable = Math.abs(el.scrollTop - lastTop) <= 1 ? stable + 1 : 0;
           lastTop = el.scrollTop;
-          if (stable >= 3 && aligned()) {
-            // Only "start" has a DOM-truth phase: it's the deep-link landing
-            // alignment, and the one whose target-at-top intent the formula
-            // above encodes.
-            if (align === "start" && domDelta() !== undefined) {
-              nudging = true;
-            } else {
-              finish();
-              return;
-            }
+          if (align !== "start" && stable >= 3) {
+            finish();
+            return;
           }
         }
-        if (++frames < 150) {
+        if (performance.now() - startedAt < 3000) {
           settleFrameRef.current = requestAnimationFrame(settle);
         } else {
           finish();
