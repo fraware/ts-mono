@@ -15,11 +15,7 @@ import {
 import { useNavigate } from "react-router-dom";
 
 import { EvalSample, EvalSpec } from "@tsmono/inspect-common/types";
-import {
-  buildMessageRows,
-  ChatViewRowsVirtualList,
-  messageRowsModel,
-} from "@tsmono/inspect-components/chat";
+import { ChatViewRowsVirtualList } from "@tsmono/inspect-components/chat";
 import {
   DisplayModeContext,
   RecordTree,
@@ -75,12 +71,7 @@ import {
   kSampleTranscriptTabId,
   kSampleUsageTabId,
 } from "../../constants";
-import {
-  inMemoryMessageRows,
-  kDefaultMessageRowOptions,
-  useChunkedMessages,
-  useMessageRowsModel,
-} from "../../log_data";
+import { useSampleMessages } from "../../log_data";
 import { setDocumentTitle } from "../../state/actions";
 import {
   useSelectedEvalSampleData,
@@ -100,10 +91,6 @@ import {
 } from "../routing/url";
 import { openInNewTab } from "../shared/openInNewTab";
 
-import {
-  messagesFromEvents,
-  type MessagesFromEventsState,
-} from "./messagesFromEvents";
 import styles from "./SampleDisplay.module.css";
 import { SampleJSONView } from "./SampleJSONView";
 import { SampleRetriedErrors } from "./SampleRetriedErrors";
@@ -119,8 +106,6 @@ import { SearchPanelSlot } from "./transcript/search/SearchPanelSlot";
 import { useInspectSearchReferenceLabels } from "./transcript/search/useInspectSearchReferenceLabels";
 import { TranscriptFilterPopover } from "./transcript/TranscriptFilter";
 import { TranscriptPanel } from "./transcript/TranscriptPanel";
-
-const kNoMessageRows = messageRowsModel([]);
 
 interface SampleDisplayProps {
   id: string;
@@ -205,27 +190,17 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
 
   const selectedSampleSummary = useSelectedSampleSummary();
 
-  // Consolidate the events and messages into the proper list
-  // whether running or not
+  // Consolidate the events into the proper list whether running or not
   const sampleEvents = sample?.events || runningSampleData;
-  // Cache messagesFromEvents work across polls. The polling pipeline
-  // only ever appends to the running events array (or replaces a tail
-  // event during streaming updates), so a pure-extension call only
-  // processes the new tail. Diverging events trigger a rebuild.
-  const messagesRef = useRef<MessagesFromEventsState | null>(null);
-  const sampleMessages = useMemo(() => {
-    /* eslint-disable react-hooks/refs */
-    if (sample?.messages) {
-      messagesRef.current = null;
-      return sample.messages;
-    } else if (runningSampleData) {
-      return messagesFromEvents(runningSampleData, messagesRef);
-    } else {
-      messagesRef.current = null;
-      return [];
-    }
-    /* eslint-enable react-hooks/refs */
-  }, [sample?.messages, runningSampleData]);
+
+  // Is the sample running?
+  const running = useMemo(() => {
+    return isRunning(
+      selectedSampleSummary,
+      runningSampleData,
+      sampleData.status
+    );
+  }, [selectedSampleSummary, runningSampleData, sampleData.status]);
 
   // Get all URL parameters at component level
   const {
@@ -246,54 +221,22 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
   // Use sampleTabId from parsed route if available, otherwise use the one from state
   const effectiveSelectedTab = sampleTabId || selectedTab;
 
-  // Chunked samples carry an empty shell `messages` array; the Messages tab
-  // hydrates the final conversation from message_refs instead — gated on the
-  // tab actually being open (full hydration can be ~135MB on compaction
-  // monsters; never pay it at sample open). Once hydrated it stays cached.
+  // The Messages tab's rows and export source, assembled by the data layer.
+  // Which feed serves the conversation (monolith fetch, chunked hydration,
+  // live stream) is subsystem-private; the tab-open gate keeps chunked
+  // hydration from ever being paid at sample open.
   const logDir = useLogDir();
   const selectedSampleHandle = useStore(
     (state) => state.log.selectedSampleHandle
   );
   const messagesTabOpen = effectiveSelectedTab === kSampleMessagesTabId;
-  const chunkedMessages = useChunkedMessages(
-    logDir,
-    isChunked && messagesTabOpen ? selectedSampleHandle : undefined,
-    sampleData.chunked
-  );
-
-  // The Messages tab's data source: settled conversations (monolith
-  // messages, hydrated chunked messages) go behind SampleMessagesData and
-  // the paged rows-model; the streaming path renders a fully-resident model
-  // over the events-derived array below (stage 1 of the seam — see
-  // SampleMessagesData).
-  const inlineMessages = sample?.messages;
-  const messagesSource = useMemo(() => {
-    if (isChunked) {
-      return chunkedMessages.data
-        ? inMemoryMessageRows(chunkedMessages.data)
-        : undefined;
-    }
-    return inlineMessages ? inMemoryMessageRows(inlineMessages) : undefined;
-  }, [isChunked, chunkedMessages.data, inlineMessages]);
-  const pagedRows = useMessageRowsModel(
+  const sampleMessages = useSampleMessages(
     logDir,
     selectedSampleHandle,
-    messagesSource
+    sampleData,
+    messagesTabOpen,
+    running
   );
-  const streamingRows = useMemo(
-    () =>
-      messagesSource === undefined
-        ? messageRowsModel(
-            buildMessageRows(sampleMessages, kDefaultMessageRowOptions)
-          )
-        : undefined,
-    [messagesSource, sampleMessages]
-  );
-  const messageRows = pagedRows ?? streamingRows ?? kNoMessageRows;
-  // A defined source whose first page hasn't landed yet (source swap, cache
-  // rendezvous) must read as loading, never as "No messages".
-  const messageRowsSettling =
-    messagesSource !== undefined && pagedRows === undefined;
 
   // Focus the panel when it loads
   useEffect(() => {
@@ -586,9 +529,9 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
           }
         },
         Messages: () => {
-          if (messagesSource) {
+          if (sampleMessages.source) {
             // eslint-disable-next-line @typescript-eslint/no-floating-promises
-            messagesSource.exportText().then((text) => {
+            sampleMessages.source.exportText().then((text) => {
               // eslint-disable-next-line @typescript-eslint/no-floating-promises
               navigator.clipboard.writeText(text);
               setIcon(ApplicationIcons.confirm);
@@ -630,9 +573,9 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
             );
           },
           Messages: () => {
-            if (messagesSource) {
+            if (sampleMessages.source) {
               // eslint-disable-next-line @typescript-eslint/no-floating-promises
-              messagesSource.exportText().then((text) => {
+              sampleMessages.source.exportText().then((text) => {
                 if (text.length > 0) {
                   // eslint-disable-next-line @typescript-eslint/no-floating-promises
                   api.download_file(`${sampleId}-messages.txt`, text);
@@ -668,15 +611,6 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
 
   // Search and Scans are no longer toolbar buttons — the always-visible
   // activity rail (rendered below the timeline) is the sole entry point.
-
-  // Is the sample running?
-  const running = useMemo(() => {
-    return isRunning(
-      selectedSampleSummary,
-      runningSampleData,
-      sampleData.status
-    );
-  }, [selectedSampleSummary, runningSampleData, sampleData.status]);
 
   // Only a SUCCESSFUL finish may scroll the transcript/messages back to the
   // top when a live sample completes. An errored or cancelled run renders its
@@ -951,7 +885,7 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                 <ChatViewRowsVirtualList
                   key={chatListId}
                   id={chatListId}
-                  rows={messageRows}
+                  rows={sampleMessages.rows}
                   initialMessageId={sampleDetailNavigation.message}
                   followRequested={sampleDetailNavigation.follow}
                   display={chatDisplay}
@@ -961,15 +895,7 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                   scrollRef={scrollRef}
                   tools={chatTools}
                   running={running}
-                  backfilling={
-                    backfilling ||
-                    (isChunked && chunkedMessages.loading) ||
-                    messageRowsSettling ||
-                    // monolith member fetch/parse: no source can exist yet,
-                    // but the sample query is in flight (`!running` keeps the
-                    // streaming path's "Waiting for messages" affordance)
-                    (sampleData.status === "loading" && !running)
-                  }
+                  backfilling={backfilling || sampleMessages.loading}
                   scrollToTopOnFinish={scrollToTopOnFinish}
                   className={styles.fullWidth}
                 />
