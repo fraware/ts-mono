@@ -220,7 +220,8 @@ const scoreValue = (
 ): unknown => log.derived?.scores?.[scorerName]?.[metricName];
 
 /**
- * Build the schema over a scorer map (see `useScoreSchema`). Dynamic
+ * Build the schema over a scorer map (see `useLogColumnFacts` /
+ * `readLogsColumnFacts`). Dynamic
  * columns resolve by name shape: `score_<scorer>/<metric>` reads one
  * scorer's metric; `metric_<name>` aggregates across scorers (first
  * non-empty value in alphabetical scorer order — the same rule as the

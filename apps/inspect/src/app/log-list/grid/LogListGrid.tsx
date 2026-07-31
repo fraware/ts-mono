@@ -340,26 +340,29 @@ export const LogListGrid: FC<LogListGridProps> = ({
   );
   const activeMatch = matchTargets[activeMatchIndex];
   const activeMatchId = activeMatch?.id;
+  const activeMatchOffset = activeMatch?.offset;
 
   // The single load-through trigger: whenever the active match changes —
   // a navigation, or the first result arriving without one — and the
   // debounced match query has settled, load pages through its offset.
   // DataGrid already waits to scroll a selected id until that row appears
-  // in `rows`.
+  // in `rows`. Keyed on the offset, not the match object: matchTargets
+  // recomputes on every rows flush while the band is open, and a fresh
+  // object identity would re-fire this for an unchanged position.
   useEffect(() => {
     if (
       showFind &&
       findTerm &&
       fileMatches.settled &&
-      activeMatch?.offset !== undefined
+      activeMatchOffset !== undefined
     ) {
-      ensureFileOffsetLoaded(activeMatch.offset);
+      ensureFileOffsetLoaded(activeMatchOffset);
     }
   }, [
     showFind,
     findTerm,
     fileMatches.settled,
-    activeMatch,
+    activeMatchOffset,
     ensureFileOffsetLoaded,
   ]);
 

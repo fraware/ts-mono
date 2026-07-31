@@ -760,9 +760,6 @@ export function DataGrid<TRow>({
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distanceFromBottom < fetchThreshold) onScrollNearEnd();
   }, [hasMore, onScrollNearEnd, fetchThreshold]);
-  const handleScroll = useCallback(() => {
-    checkScrollNearEnd();
-  }, [checkScrollNearEnd]);
   // Also check outside scroll events, whenever the rows change: a page that
   // doesn't out-run the threshold (or fill the viewport at all) must chain
   // the next fetch without user input, and during a replication burst the
@@ -787,11 +784,15 @@ export function DataGrid<TRow>({
     const el = containerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
+      // Same pause as the commit-driven check: a resize while a fetch is
+      // settled in error must not become an undocumented retry path (scroll
+      // stays the live one).
+      if (autoFetchPaused) return;
       checkScrollNearEnd();
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [checkScrollNearEnd]);
+  }, [autoFetchPaused, checkScrollNearEnd]);
 
   // Polite live-region text. ag-grid maintained its own off-screen live region
   // that spoke row-count/sort changes; reproduce a concise equivalent so a
@@ -825,7 +826,7 @@ export function DataGrid<TRow>({
       aria-busy={loading || undefined}
       tabIndex={0}
       onKeyDown={handleKeyDown}
-      onScroll={handleScroll}
+      onScroll={checkScrollNearEnd}
     >
       <div className={styles.srStatus} role="status" aria-live="polite">
         {statusMessage}

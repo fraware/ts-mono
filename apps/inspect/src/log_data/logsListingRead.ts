@@ -91,7 +91,7 @@ const scanScopeFromFilter = (logDir: string, filter?: Condition): ScanScope => {
       : undefined;
   };
   const parentDir = filter && walk(filter);
-  return parentDir === undefined || parentDir === null
+  return parentDir === undefined
     ? { prefix: logDir }
     : { prefix: parentDir, parentDir };
 };
