@@ -71,14 +71,8 @@ export interface SyncScopeRecord {
   last_accessed: string;
 }
 
-// The schema's shape version — bump on any table/index change. Also bumped
-// (13 → 14, no shape change) to wipe databases poisoned by the path-blind
-// get_log in-flight dedupe, which wrote one log's details under concurrent
-// neighbors' names — those rows sit at detailed depth with unchanged mtimes,
-// so nothing else would ever refetch them. 14 → 15 added the stored+indexed
-// `parent_dir` column (recreate-on-mismatch repopulates it via replication;
-// no backfill needed).
-const SCHEMA_VERSION = 15;
+// The schema's shape version — bump on any table/index change.
+const SCHEMA_VERSION = 14;
 
 // Runtime backstop for derive.ts's DeriveVersion type constraint: at 100 the
 // composition below aliases into the next schema version's namespace, and an
