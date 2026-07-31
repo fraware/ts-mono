@@ -41,35 +41,6 @@ export type PersistedState = {
   logs: LogsSlice["logs"];
 };
 
-/**
- * Bring an older persisted state up to the current version (exported for
- * tests; wired into `persist` below). Returns `undefined` to discard the
- * state — hydration then falls back to the in-memory defaults.
- */
-export const migratePersistedState = (
-  persisted: unknown,
-  version: number
-): PersistedState | undefined => {
-  // Pre-v4 states predate this migrate function and were discarded by the
-  // no-migrate version mismatch; keep that behavior rather than guessing at
-  // their shapes.
-  if (version < 4) return undefined;
-  const state = persisted as PersistedState;
-  if (version < 5) {
-    // v5 changed the Path column's value from the view-relative display
-    // name to the record's full path (so display agrees with what a `path`
-    // condition matches). A persisted `path` filter holds old-form values
-    // that can never match a full path — it would read as "No matching
-    // items" over a populated directory — so drop it; everything else
-    // carries over.
-    const byScope = state.logs?.listing?.gridStateByScope ?? {};
-    for (const entry of Object.values(byScope)) {
-      if (entry?.columnFilters) delete entry.columnFilters["path"];
-    }
-  }
-  return state;
-};
-
 // Create a proxy store that forwards calls to the real store once initialized
 export const useStore = ((selector?: (state: StoreState) => unknown) => {
   if (!storeImplementation) {
@@ -134,9 +105,12 @@ export const initializeStore = (
               log: state.log,
               logs: state.logs,
             }) as unknown as StoreState,
+          // No migrate function: a version mismatch discards the persisted
+          // state (zustand's default), as every previous bump did. v5 exists
+          // because v4 states can hold Path column filters in the old
+          // view-relative form, which the full-path Path column can never
+          // match — silently filtering a populated directory to empty.
           version: 5,
-          migrate: (persisted, version) =>
-            migratePersistedState(persisted, version) as StoreState,
           onRehydrateStorage: (state: StoreState) => {
             return (hydrationState, error) => {
               log.debug("REHYDRATING STATE");
