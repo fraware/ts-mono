@@ -7,6 +7,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import type { RefObject } from "react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { LogsListingMatch } from "../../../log_data";
@@ -132,26 +133,28 @@ describe("LogListGrid Find pagination", () => {
       type: "file",
     };
     return render(
-      <LogListGrid
-        rows={[loadedRow]}
-        totalRowCount={2}
-        sorting={[]}
-        busy={false}
-        listing={{
-          scopeKey: "logs::/logs",
-          // Never called here: useLogsListingMatches is mocked above.
-          data: {
-            getPage: () => Promise.reject(new Error("unused")),
-            getMatches: () => Promise.reject(new Error("unused")),
-            getOverview: () => Promise.reject(new Error("unused")),
-          },
-        }}
-        rowIdForName={(name) => name}
-        hasMoreRows
-        fetchMoreRows={() => {}}
-        ensureFileOffsetLoaded={holder.ensureOffsetLoaded}
-        autoFetchPaused={false}
-      />
+      <MemoryRouter>
+        <LogListGrid
+          rows={[loadedRow]}
+          totalRowCount={2}
+          sorting={[]}
+          busy={false}
+          listing={{
+            scopeKey: "logs::/logs",
+            // Never called here: useLogsListingMatches is mocked above.
+            data: {
+              getPage: () => Promise.reject(new Error("unused")),
+              getMatches: () => Promise.reject(new Error("unused")),
+              getOverview: () => Promise.reject(new Error("unused")),
+            },
+          }}
+          rowIdForName={(name) => name}
+          hasMoreRows
+          fetchMoreRows={() => {}}
+          ensureFileOffsetLoaded={holder.ensureOffsetLoaded}
+          autoFetchPaused={false}
+        />
+      </MemoryRouter>
     );
   };
 
