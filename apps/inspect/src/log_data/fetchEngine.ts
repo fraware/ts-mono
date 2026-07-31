@@ -1256,7 +1256,14 @@ export class FetchEngine {
       if (!deps || Object.keys(updates).length === 0) {
         return;
       }
-      await deps.sink.writePreviews(updates).catch(() => {});
+      await deps.sink.writePreviews(updates).catch(() => {
+        // The buffer was already swapped out, so the updates are lost — and
+        // requeueMissing may have counted them at their settled depth and
+        // latched idle. Un-latch so the next no-change tick re-derives the
+        // gap; otherwise the rows sit below their fetched depth until a real
+        // listing change.
+        this._backfillIdle = false;
+      });
       this._throttledUpdateDbStats();
     } finally {
       this._flushingPreviews = false;
@@ -1280,7 +1287,10 @@ export class FetchEngine {
       if (!deps || Object.keys(updates).length === 0) {
         return;
       }
-      await deps.sink.writeDetails(updates).catch(() => {});
+      await deps.sink.writeDetails(updates).catch(() => {
+        // See flushPreviewWrites: a lost flush must not leave backfill idle.
+        this._backfillIdle = false;
+      });
       this._throttledUpdateDbStats();
     } finally {
       this._flushingDetails = false;
