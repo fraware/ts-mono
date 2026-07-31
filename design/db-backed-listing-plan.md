@@ -582,3 +582,46 @@ and the warm banner's swallowed error text.)
   partial fit (`pageBounds` is bidirectional and slices a total, not an
   array), so fold together only if a cursor-shape change ever forces both
   to move.
+
+Second triage (PR #454 review, resolved 2026-07-31; fixed from that
+review: the `writeLogs` transaction, the snapshot cache's retry
+ownership, the failed-flush idle un-latch, plus the review nits):
+
+- **Overview error results discard retained data**: `useLogsOverview`
+  (and `useSamplesLogFacts`) build on `useAsyncDataFromQuery`, which maps
+  `isError` to an error-only result even though react-query still holds
+  the last successful data. A transient warm-refetch failure therefore
+  drops folder rows and footer/progress counts — and in a folders-only
+  dir flips the cold ErrorPanel on, losing scroll/selection/find state —
+  where the row query retains its window beside the error
+  (`useLogsListingQuery`). Deliberately deferred: the fix wants a
+  retained-data variant of the shared hook, decided alongside the warm
+  banner's design rather than patched per-consumer.
+- **Retried-toggle flash on the samples page**: `showRetriedLogs` is in
+  the samples log-facts query key with no `placeholderData`, so the first
+  flip renders an empty grid until the facts scan lands (flipping back is
+  cached). Same family as the retried-toggle aggregate transition above.
+- **Cross-tab `clearAll` strands the identity tier**: another tab's
+  "Clear Local Database" empties the store while this tab's engine
+  handle mirror still claims everything is persisted; content re-fetches
+  recreate rows via merges (no task/mtime), and `changedHandles` keeps
+  diffing to empty so the identity columns stay blank on a quiet dir
+  until reload. Needs cross-tab signaling (BroadcastChannel or a
+  storage-event nudge) — out of scope for the listing seam.
+- **`requeueMissing` never converges for an out-of-dir seeded handle**:
+  an `ensureListed`-seeded name outside the scope prefix can't appear in
+  the scoped store read, so every no-change tick re-derives it as missing
+  and re-fetches. Narrow (dir mode + an out-of-dir deep link surviving to
+  a no-change tick; applied listings drop the seed); guard by filtering
+  the pass to in-scope names when next touching backfill derivation.
+- **`pageBounds` backward cursors don't clamp to a shrunken total**: a
+  backward page whose cursor outlived a snapshot shrink walks one empty
+  page per `limit` until it re-enters range. Unreachable today (all
+  production callers page forward); clamp when a backward consumer
+  arrives.
+- **Cache-mirror read-back ordering (pre-existing)**: `writeListing`'s
+  read-back + `setRows` can overwrite an observed per-log cache entry
+  with a headerless row if a `writeDetails` merge commits between the
+  read-back transaction and the cache write; with infinite `staleTime`
+  nothing restores the header until remount. The db-level analogs were
+  serialized on this branch; the mirror needs the same discipline.
