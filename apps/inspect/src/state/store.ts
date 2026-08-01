@@ -105,11 +105,6 @@ export const initializeStore = (
               log: state.log,
               logs: state.logs,
             }) as unknown as StoreState,
-          // No migrate function: a version mismatch discards the persisted
-          // state (zustand's default), as every previous bump did. v5 exists
-          // because v4 states can hold Path column filters in the old
-          // view-relative form, which the full-path Path column can never
-          // match — silently filtering a populated directory to empty.
           version: 5,
           onRehydrateStorage: (state: StoreState) => {
             return (hydrationState, error) => {
