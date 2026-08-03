@@ -101,23 +101,6 @@ export const windowedMessageRows = (
 ): SampleMessagesData => {
   const index = new LazyRowIndex(conversation, options);
 
-  // late-system detection: rows served before a system message (or an
-  // additional one) is discovered were numbered/offset under the old
-  // fold — practically unseen (system prompts lead conversations), but
-  // it must be loud, not silent
-  let servedSystem: number | undefined;
-  const checkSystemStability = (): void => {
-    const seen = index.scanner.systemStarts.length;
-    if (servedSystem !== undefined && servedSystem !== seen) {
-      log.warn(
-        `system message discovered after rows were served ` +
-          `(${servedSystem} -> ${seen}): previously served offsets/numbers ` +
-          `are stale until re-read`
-      );
-    }
-    servedSystem = seen;
-  };
-
   const systemRow = async (): Promise<MessageRow | undefined> => {
     const starts = [...index.scanner.systemStarts];
     const systemMessages = (
@@ -135,7 +118,6 @@ export const windowedMessageRows = (
       let hi = lo + Math.max(pagination.limit, 0);
 
       await index.ensureRows(hi);
-      checkSystemStability();
       const known = index.knownRowCount;
       const exhausted = index.exhausted;
       if (exhausted) {

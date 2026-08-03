@@ -196,8 +196,8 @@ export class MessageRowScanner {
 
   /** Whether the fold has a merged system row, given messages seen so
    *  far. A system message discovered later flips this — and shifts every
-   *  row offset and number — which callers must treat as a (logged,
-   *  practically unseen) index invalidation. */
+   *  row offset and number — which callers must treat as a (practically
+   *  unseen) index invalidation. */
   get hasSystemRow(): boolean {
     return this.options.collapseToolMessages && this.systemContentItems > 0;
   }
