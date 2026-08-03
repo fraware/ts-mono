@@ -41,7 +41,11 @@ export const inMemoryConversation = (
 ): SampleConversation => {
   const getMessages = (start: number, end: number) =>
     Promise.resolve(messages.slice(Math.max(0, start), Math.max(0, end)));
-  return { messageCount: messages.length, getMessages, getMessagesRaw: getMessages };
+  return {
+    messageCount: messages.length,
+    getMessages,
+    getMessagesRaw: getMessages,
+  };
 };
 
 /**

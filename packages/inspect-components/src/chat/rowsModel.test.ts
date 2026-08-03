@@ -8,8 +8,8 @@ import {
   buildSystemMessageRow,
   countRowBlocks,
   MessageRowOptions,
-  MessageRowScanner,
   messageRowOptions,
+  MessageRowScanner,
   type MessageRow,
 } from "./rowsModel";
 
@@ -102,11 +102,7 @@ const reconstruct = (
     out.push(systemRow!);
     number += countRowBlocks(systemRow!.resolved, options.toolCallStyle);
   }
-  const startNumbers = scanner.rows.map((fact) => {
-    const start = number;
-    number += fact.blocks;
-    return start;
-  });
+  const startNumbers = scanner.rows.map((fact) => number + fact.blocksBefore);
   for (let lo = 0; lo < scanner.rows.length; lo += pageSize) {
     const hi = Math.min(lo + pageSize, scanner.rows.length);
     const msgLo = scanner.rows[lo]!.start;
@@ -206,12 +202,14 @@ describe("MessageRowScanner", () => {
     expect(feed(noSystem).hasSystemRow).toBe(false);
   });
 
-  it("counts numbering blocks from the head message alone", () => {
+  it("accumulates block prefix sums from head messages alone", () => {
     const scanner = feed(kitchenSink);
-    // assistant with two tool calls and no visible content renders 2
-    // blocks (chat message skipped); assistant with one call and visible
-    // content renders 2 (message + call)
-    expect(scanner.rows.map((fact) => fact.blocks)).toEqual([1, 2, 1, 1, 2, 1]);
+    // row block widths are [1, 2, 1, 1, 2, 1]: an assistant with two tool
+    // calls and no visible content renders 2 blocks (chat message
+    // skipped); one call plus visible content renders 2 (message + call)
+    expect(scanner.rows.map((fact) => fact.blocksBefore)).toEqual([
+      0, 1, 3, 4, 5, 7,
+    ]);
   });
 
   it("treats empty-array system content as no system row", () => {

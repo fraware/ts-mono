@@ -5,10 +5,7 @@ import { messagesToStr } from "@tsmono/inspect-components/chat";
 
 import { type Cursor } from "../client/database/listing";
 
-import {
-  inMemoryConversation,
-  type SampleConversation,
-} from "./conversation";
+import { inMemoryConversation, type SampleConversation } from "./conversation";
 import {
   inMemoryMessageRows,
   type MessageRowsPage,
@@ -60,7 +57,9 @@ const trailingToolRun: ChatMessage[] = [
   {
     role: "assistant",
     content: "",
-    tool_calls: [{ id: "c-9", function: "bash", arguments: {}, type: "function" }],
+    tool_calls: [
+      { id: "c-9", function: "bash", arguments: {}, type: "function" },
+    ],
   },
   { role: "tool", content: "part 1", tool_call_id: "c-9" },
   { role: "tool", content: "part 2", tool_call_id: "c-9" },

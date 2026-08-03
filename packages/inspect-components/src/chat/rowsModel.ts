@@ -4,9 +4,9 @@ import type {
 } from "@tsmono/inspect-common/types";
 
 import {
+  mergedSystemMessage,
   Message,
   MessageFold,
-  mergedSystemMessage,
   ResolvedMessage,
   resolveMessages,
 } from "./messages";
@@ -133,14 +133,15 @@ export const buildSystemMessageRow = (
     : undefined;
 };
 
-/** Per-row facts a scan retains: where the row starts and how many
- *  numbering blocks it renders. Everything else is re-derivable by
- *  re-folding the row's message window. */
+/** Per-row facts a scan retains: where the row starts and where its
+ *  numbering begins. Everything else is re-derivable by re-folding the
+ *  row's message window. */
 export interface ScannedRowFact {
   /** Conversation position of the row's head (non-tool) message. */
   start: number;
-  /** Blocks the row renders (numbering advances by this). */
-  blocks: number;
+  /** Numbering blocks rendered by every row before this one — the prefix
+   *  sum a row's start number reads off directly. */
+  blocksBefore: number;
 }
 
 /**
@@ -158,6 +159,7 @@ export class MessageRowScanner {
   readonly systemStarts: number[] = [];
   private systemContentItems = 0;
   private lastBoundary = -1;
+  private blocksTotal = 0;
 
   constructor(private readonly options: MessageRowOptions) {}
 
@@ -165,13 +167,7 @@ export class MessageRowScanner {
     if (!this.options.collapseToolMessages) {
       // no folding: every message is its own, immediately-complete row
       this.lastBoundary = index;
-      this.rows.push({
-        start: index,
-        blocks: countRowBlocks(
-          { message, toolMessages: [] },
-          this.options.toolCallStyle
-        ),
-      });
+      this.pushRow(message, index);
       return;
     }
     if (message.role === "tool") {
@@ -185,13 +181,17 @@ export class MessageRowScanner {
         : 1;
       return;
     }
-    this.rows.push({
-      start: index,
-      blocks: countRowBlocks(
-        { message, toolMessages: [] },
-        this.options.toolCallStyle
-      ),
-    });
+    this.pushRow(message, index);
+  }
+
+  private pushRow(message: ChatMessage, index: number): void {
+    // block counts depend only on the head message, so the prefix sum is
+    // final the moment the row is discovered
+    this.rows.push({ start: index, blocksBefore: this.blocksTotal });
+    this.blocksTotal += countRowBlocks(
+      { message, toolMessages: [] },
+      this.options.toolCallStyle
+    );
   }
 
   /** Whether the fold has a merged system row, given messages seen so

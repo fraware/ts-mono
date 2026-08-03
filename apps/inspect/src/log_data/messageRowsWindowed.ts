@@ -34,8 +34,6 @@ const kExportBatchMessages = 200;
 
 class LazyRowIndex {
   readonly scanner: MessageRowScanner;
-  /** blockPrefix[i] = numbering blocks rendered by scanner rows [0, i). */
-  private blockPrefix: number[] = [0];
   scanPos = 0;
   private chain: Promise<void> = Promise.resolve();
 
@@ -62,7 +60,7 @@ class LazyRowIndex {
 
   /** Whole-conversation number of scanner row `i`'s first block. */
   startNumber(i: number): number {
-    return 1 + this.shift + (this.blockPrefix[i] ?? 0);
+    return 1 + this.shift + (this.scanner.rows[i]?.blocksBefore ?? 0);
   }
 
   /**
@@ -82,12 +80,6 @@ class LazyRowIndex {
         batch.forEach((message, i) => {
           this.scanner.next(message, this.scanPos + i);
         });
-        for (let i = this.blockPrefix.length; i <= this.scanner.rows.length; i++) {
-          this.blockPrefix.push(
-            (this.blockPrefix[i - 1] ?? 0) +
-              (this.scanner.rows[i - 1]?.blocks ?? 0)
-          );
-        }
         this.scanPos = end;
       }
     };
@@ -199,7 +191,8 @@ export const windowedMessageRows = (
         offset: lo,
         knownRowCount: known,
         exhausted,
-        nextCursor: hi > lo && (hi < known || !exhausted) ? { offset: hi } : null,
+        nextCursor:
+          hi > lo && (hi < known || !exhausted) ? { offset: hi } : null,
         prevCursor:
           lo > 0 && hi > lo
             ? { offset: Math.max(0, lo - pagination.limit) }

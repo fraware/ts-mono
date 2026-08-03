@@ -16,10 +16,7 @@ import { messagesToStr } from "@tsmono/inspect-components/chat";
 
 import { openZipFileFromBuffer } from "../../client/remote/remoteZipFile";
 import { chunkedConversation } from "../conversation";
-import {
-  inMemoryMessageRows,
-  type SampleMessagesData,
-} from "../messageRows";
+import { inMemoryMessageRows, type SampleMessagesData } from "../messageRows";
 import { windowedMessageRows } from "../messageRowsWindowed";
 
 import { openChunkedSample, type ChunkedSample } from "./chunkedSample";
