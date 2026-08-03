@@ -247,7 +247,7 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
     messagesTabOpen,
     running
   );
-  const exportMessages = useMessagesExport(selectedSampleHandle, sampleData);
+  const exportMessages = useMessagesExport(sampleData);
 
   // Focus the panel when it loads
   useEffect(() => {

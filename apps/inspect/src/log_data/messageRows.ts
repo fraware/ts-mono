@@ -70,6 +70,31 @@ export const paginationRange = (
 // are the single authority for how conversations fold
 export const kDefaultMessageRowOptions: MessageRowOptions = messageRowOptions();
 
+/** Page size for full drains (the interim whole-conversation consumers). */
+export const kDrainPageRows = 500;
+
+/**
+ * Drain a source into the full rows array by walking pages forward — the
+ * interim consumer shape until the chat list virtualizes over pages.
+ */
+export const drainMessageRows = async (
+  source: SampleMessagesData,
+  pageSize: number = kDrainPageRows
+): Promise<MessageRow[]> => {
+  const rows: MessageRow[] = [];
+  let cursor: Cursor | null = null;
+  do {
+    const page: MessageRowsPage = await source.getRows({
+      cursor,
+      direction: "forward",
+      limit: pageSize,
+    });
+    rows.push(...page.rows);
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return rows;
+};
+
 /**
  * A source over an inline message array (monolith samples and hydrated
  * chunked samples — every source in this stage).

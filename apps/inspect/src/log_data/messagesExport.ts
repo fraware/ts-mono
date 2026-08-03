@@ -1,15 +1,7 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { SampleHandle } from "../app/types";
-
-import {
-  chunkedMessagesQueryKey,
-  hydrateFinalConversation,
-} from "./chunkedMessages";
-import { inMemoryMessageRows } from "./messageRows";
 import { type EvalSampleData } from "./sampleData";
-import { kSampleGcTimeMs } from "./sampleQuery";
+import { sampleMessagesSource } from "./sampleMessagesSource";
 
 /**
  * A sample conversation's exported text, produced on demand from a
@@ -45,36 +37,16 @@ export const messagesExportFrom = (
 
 /**
  * Copy/Download > Messages: the settled conversation as text, produced on
- * demand. Undefined when there is no settled conversation to export (live
- * streaming samples, a sample still loading). Chunked samples hydrate on
- * first use, through the same query the Messages tab reads, so export
- * never requires the tab to have been opened.
+ * demand through the same source the Messages tab reads (chunked samples
+ * stream window by window off the shared chunk caches — export never
+ * hydrates a conversation, and never requires the tab to have been
+ * opened). Undefined when there is no settled conversation to export
+ * (live streaming samples, a sample still loading).
  */
 export const useMessagesExport = (
-  handle: SampleHandle | undefined,
   sampleData: EvalSampleData
-): MessagesExport | undefined => {
-  const queryClient = useQueryClient();
-  const chunked = sampleData.chunked;
-  const messages =
-    chunked === undefined ? sampleData.sample?.messages : undefined;
-  return useMemo(() => {
-    if (chunked && handle) {
-      return messagesExportFrom(async function* () {
-        const hydrated = await queryClient.fetchQuery({
-          queryKey: chunkedMessagesQueryKey(handle),
-          queryFn: () => hydrateFinalConversation(chunked),
-          gcTime: kSampleGcTimeMs,
-          // a settled chunked conversation is immutable: reuse a resident
-          // hydration instead of re-fetching it per export
-          staleTime: Infinity,
-        });
-        yield* inMemoryMessageRows(hydrated).exportText();
-      });
-    }
-    if (messages) {
-      return messagesExportFrom(() => inMemoryMessageRows(messages).exportText());
-    }
-    return undefined;
-  }, [queryClient, chunked, handle, messages]);
-};
+): MessagesExport | undefined =>
+  useMemo(() => {
+    const source = sampleMessagesSource(sampleData);
+    return source ? messagesExportFrom(() => source.exportText()) : undefined;
+  }, [sampleData]);
