@@ -547,7 +547,8 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
         },
         // offered only when a settled conversation exists to export — live
         // streaming samples have none, and a silent no-op menu item reads
-        // as broken (chunked samples hydrate on demand inside the export)
+        // as broken (chunked samples stream the text on demand inside the
+        // export, window by window — never a whole-conversation hydration)
         ...(exportMessages
           ? {
               Messages: () => {

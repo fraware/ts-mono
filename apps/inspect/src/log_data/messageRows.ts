@@ -27,8 +27,9 @@ export interface SampleMessagesData {
   /** One page of resolved rows. */
   getRows(pagination: Pagination): Promise<MessageRowsPage>;
   /** The whole conversation as text (copy/download), streamed in parts —
-   *  concatenating every part yields exactly the conversation text, and
-   *  no single part is ever the whole of a windowed source's output. */
+   *  concatenating every part yields exactly the conversation text. A
+   *  windowed source bounds each part's residency rather than
+   *  materializing the whole text at once. */
   exportText(): AsyncIterable<string>;
 }
 

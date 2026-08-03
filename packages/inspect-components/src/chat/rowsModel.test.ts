@@ -188,6 +188,17 @@ describe("MessageRowScanner", () => {
     expect(sealed.completedRowCount(false)).toBe(2);
   });
 
+  it("completes every row on discovery when folding is off", () => {
+    const scanner = new MessageRowScanner(
+      messageRowOptions({ callStyle: "complete", collapseToolMessages: false })
+    );
+    kitchenSink.slice(0, 3).forEach((message, i) => {
+      scanner.next(message, i);
+    });
+    expect(scanner.rows.length).toBe(3);
+    expect(scanner.completedRowCount(false)).toBe(3);
+  });
+
   it("tracks system content without emitting rows for it", () => {
     const scanner = feed(kitchenSink);
     expect(scanner.systemStarts).toEqual([0, 5]);

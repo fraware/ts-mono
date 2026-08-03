@@ -37,30 +37,6 @@ export const messageRowOptions = (
   collapseToolMessages: tools?.collapseToolMessages ?? true,
 });
 
-/**
- * Fold messages into rows and attach start numbers — the whole-conversation
- * derivation the chat list renders from (tool folding, block prefix sums).
- * React-free so data-layer sources can build rows without dragging in
- * JSX/CSS modules.
- */
-export const buildMessageRows = (
-  messages: ChatMessage[],
-  options: MessageRowOptions
-): MessageRow[] => {
-  const resolved = options.collapseToolMessages
-    ? resolveMessages(messages)
-    : messages.map((message) => ({
-        message,
-        toolMessages: [],
-      }));
-  let next = 1;
-  return resolved.map((row) => {
-    const startNumber = next;
-    next += countRowBlocks(row, options.toolCallStyle);
-    return { resolved: row, startNumber };
-  });
-};
-
 const numberRows = (
   resolved: ResolvedMessage[],
   startNumber: number,
@@ -73,6 +49,24 @@ const numberRows = (
     return { resolved: row, startNumber: rowStart };
   });
 };
+
+/**
+ * Fold messages into rows and attach start numbers — the whole-conversation
+ * derivation the chat list renders from (tool folding, block prefix sums).
+ * React-free so data-layer sources can build rows without dragging in
+ * JSX/CSS modules.
+ */
+export const buildMessageRows = (
+  messages: ChatMessage[],
+  options: MessageRowOptions
+): MessageRow[] =>
+  numberRows(
+    options.collapseToolMessages
+      ? resolveMessages(messages)
+      : messages.map((message) => ({ message, toolMessages: [] })),
+    1,
+    options.toolCallStyle
+  );
 
 /**
  * Fold a window of the conversation into rows — the windowed counterpart of
@@ -205,10 +199,15 @@ export class MessageRowScanner {
   /**
    * Rows whose tool run is sealed by a later non-tool message. The last
    * discovered row stays open until one arrives — or `exhausted` says the
-   * conversation ended.
+   * conversation ended. Without folding there are no tool runs, so every
+   * row is complete on discovery.
    */
   completedRowCount(exhausted: boolean): number {
-    if (exhausted || this.rows.length === 0) {
+    if (
+      !this.options.collapseToolMessages ||
+      exhausted ||
+      this.rows.length === 0
+    ) {
       return this.rows.length;
     }
     const last = this.rows[this.rows.length - 1];
