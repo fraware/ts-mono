@@ -16,7 +16,10 @@ import { messagesToStr } from "@tsmono/inspect-components/chat";
 
 import { openZipFileFromBuffer } from "../../client/remote/remoteZipFile";
 import { chunkedConversation } from "../conversation";
-import { drainMessageRows, inMemoryMessageRows } from "../messageRows";
+import {
+  inMemoryMessageRows,
+  type SampleMessagesData,
+} from "../messageRows";
 import { windowedMessageRows } from "../messageRowsWindowed";
 
 import { openChunkedSample, type ChunkedSample } from "./chunkedSample";
@@ -59,6 +62,23 @@ const openLog = async (name: string): Promise<OpenLog> => {
 const logNames = readdirSync(logsDir).filter((name) => name.endsWith(".eval"));
 
 const allVisible = () => true;
+
+/** Walk a source's pages forward — pinning the cursor mechanics the
+ *  production consumer (one whole-row-space read) doesn't exercise. */
+const drainRows = async (source: SampleMessagesData, pageSize: number) => {
+  const rows = [];
+  let cursor: Record<string, unknown> | null = null;
+  do {
+    const page = await source.getRows({
+      cursor,
+      direction: "forward",
+      limit: pageSize,
+    });
+    rows.push(...page.rows);
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return rows;
+};
 
 const decodeCtx = (
   sample: ChunkedSample,
@@ -181,9 +201,7 @@ describe("chunked corpus", () => {
       });
       for (const pageSize of [1, 7, 1000]) {
         const source = windowedMessageRows(chunkedConversation(sample));
-        expect(await drainMessageRows(source, pageSize)).toEqual(
-          rowsOracle.rows
-        );
+        expect(await drainRows(source, pageSize)).toEqual(rowsOracle.rows);
       }
 
       // exportText streams the exact whole-conversation text

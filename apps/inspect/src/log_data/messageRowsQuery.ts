@@ -7,7 +7,6 @@ import { AsyncData } from "@tsmono/util";
 
 import { SampleHandle } from "../app/types";
 
-import { drainMessageRows } from "./messageRows";
 import { type EvalSampleData } from "./sampleData";
 import { sampleMessagesSource } from "./sampleMessagesSource";
 import { kSampleGcTimeMs } from "./sampleQuery";
@@ -16,11 +15,11 @@ import { kSampleGcTimeMs } from "./sampleQuery";
  * The settled conversation's rows for a sample, held in react-query.
  * Which feed backs them — inline monolith messages or the windowed source
  * over a chunked sample's conversation — is selected behind the
- * SampleMessagesData seam (`sampleMessagesSource`). This stage still
- * drains every page into one array (the chat list renders prebuilt rows),
- * but the read walks real pages: a chunked sample's rows are scanned,
- * fetched, and folded window by window, never held as one hydrated
- * conversation.
+ * SampleMessagesData seam (`sampleMessagesSource`). This stage reads the
+ * whole row space in one getRows call (the chat list renders prebuilt
+ * rows); everything below the seam — scanning, chunk fetches, folding —
+ * serves that request the same way it will serve real pages when the
+ * list virtualizes over them.
  *
  * Returns undefined while there is no settled conversation to read (a
  * live streaming sample, a sample still fetching, the Messages tab never
@@ -49,7 +48,14 @@ export const useMessageRows = (
     ],
     queryFn:
       activated && source && handle
-        ? () => drainMessageRows(source)
+        ? async () => {
+            const page = await source.getRows({
+              cursor: null,
+              direction: "forward",
+              limit: Number.MAX_SAFE_INTEGER,
+            });
+            return page.rows;
+          }
         : skipToken,
     gcTime: kSampleGcTimeMs,
     staleTime: Infinity,
