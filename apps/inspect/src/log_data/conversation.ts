@@ -23,19 +23,26 @@ export interface SampleConversation {
   /** Messages `[start, end)` of the conversation, fully resolved.
    *  Out-of-range bounds clamp to `[0, messageCount)`. */
   getMessages(start: number, end: number): Promise<ChatMessage[]>;
+  /**
+   * Messages `[start, end)` with attachment refs left unresolved — for
+   * scans that only inspect structure (roles, tool calls, content
+   * presence) and must not pay attachment downloads. Same clamping.
+   */
+  getMessagesRaw(start: number, end: number): Promise<ChatMessage[]>;
 }
 
 /**
  * A conversation over an inline message array (monolith samples, tests) —
- * the reference implementation of the clamping contract.
+ * the reference implementation of the clamping contract. Inline messages
+ * are already fully resolved, so raw reads are the same reads.
  */
 export const inMemoryConversation = (
   messages: ChatMessage[]
-): SampleConversation => ({
-  messageCount: messages.length,
-  getMessages: (start, end) =>
-    Promise.resolve(messages.slice(Math.max(0, start), Math.max(0, end))),
-});
+): SampleConversation => {
+  const getMessages = (start: number, end: number) =>
+    Promise.resolve(messages.slice(Math.max(0, start), Math.max(0, end)));
+  return { messageCount: messages.length, getMessages, getMessagesRaw: getMessages };
+};
 
 /**
  * Map conversation positions `[start, end)` to half-open ranges of the
@@ -77,28 +84,38 @@ export const chunkedConversation = (
 ): SampleConversation => {
   const refs = chunked.shell.message_refs;
   const messageCount = refs.reduce((n, [start, end]) => n + (end - start), 0);
-  return {
-    messageCount,
-    getMessages: async (start, end) => {
-      const lo = Math.max(0, start);
-      const hi = Math.min(Math.max(lo, end), messageCount);
-      const ranges = conversationRanges(refs, lo, hi);
-      const parts = await Promise.all(
-        ranges.map(([rangeLo, rangeHi]) =>
-          chunked.messages.getRange(rangeLo, rangeHi).then((messages) => {
+  const readRanges = async (
+    start: number,
+    end: number,
+    resolve: boolean
+  ): Promise<ChatMessage[]> => {
+    const lo = Math.max(0, start);
+    const hi = Math.min(Math.max(lo, end), messageCount);
+    const ranges = conversationRanges(refs, lo, hi);
+    const parts = await Promise.all(
+      ranges.map(([rangeLo, rangeHi]) =>
+        chunked.messages.getRange(rangeLo, rangeHi).then((messages) => {
+          if (resolve) {
             // best-effort warmup; the final resolve pass is the error surface
             prefetchAttachments(messages, chunked).catch(() => undefined);
-            return messages;
-          })
-        )
-      );
-      const messages = parts.flat();
-      const label = `conversation [${lo}, ${hi})`;
-      log.info(
-        `read ${label}: ${messages.length} messages via ` +
-          `${ranges.length} range${ranges.length === 1 ? "" : "s"}`
-      );
-      return withAttachmentsResolved(messages, chunked, label);
-    },
+          }
+          return messages;
+        })
+      )
+    );
+    const messages = parts.flat();
+    const label = `conversation [${lo}, ${hi})${resolve ? "" : " (raw)"}`;
+    log.info(
+      `read ${label}: ${messages.length} messages via ` +
+        `${ranges.length} range${ranges.length === 1 ? "" : "s"}`
+    );
+    return resolve
+      ? withAttachmentsResolved(messages, chunked, label)
+      : messages;
+  };
+  return {
+    messageCount,
+    getMessages: (start, end) => readRanges(start, end, true),
+    getMessagesRaw: (start, end) => readRanges(start, end, false),
   };
 };
