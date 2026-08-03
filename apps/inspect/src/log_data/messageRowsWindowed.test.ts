@@ -42,18 +42,18 @@ const kitchenSink: ChatMessage[] = [
   },
   { role: "tool", content: "ok", tool_call_id: "c-3" },
   { role: "assistant", content: "bye" },
-] as ChatMessage[];
+];
 
 const leadingTools: ChatMessage[] = [
   { role: "tool", content: "orphan", tool_call_id: "c-0" },
   { role: "user", content: "hi" },
   { role: "assistant", content: "hello" },
-] as ChatMessage[];
+];
 
 const noSystem: ChatMessage[] = [
   { role: "user", content: "hi" },
   { role: "assistant", content: "hello" },
-] as ChatMessage[];
+];
 
 const trailingToolRun: ChatMessage[] = [
   { role: "user", content: "go" },
@@ -64,7 +64,7 @@ const trailingToolRun: ChatMessage[] = [
   },
   { role: "tool", content: "part 1", tool_call_id: "c-9" },
   { role: "tool", content: "part 2", tool_call_id: "c-9" },
-] as ChatMessage[];
+];
 
 const plainConversation = (count: number): ChatMessage[] =>
   Array.from({ length: count }, (_, i): ChatMessage => ({
@@ -101,7 +101,10 @@ const collectText = async (source: SampleMessagesData): Promise<string> => {
 /** A conversation instrumented with how far reads have actually gone. */
 const instrumented = (messages: ChatMessage[]) => {
   const inner = inMemoryConversation(messages);
-  const stats = { rawHigh: 0, resolved: [] as [number, number][] };
+  const stats: { rawHigh: number; resolved: [number, number][] } = {
+    rawHigh: 0,
+    resolved: [],
+  };
   const conversation: SampleConversation = {
     messageCount: inner.messageCount,
     getMessages: (start, end) => {
@@ -286,10 +289,10 @@ describe("windowedMessageRows late-system discovery", () => {
   it("re-reads reflect a system message found deep in the conversation", async () => {
     // system content past the first scan batch: early pages fold without
     // a merged row 0; once discovered, fresh reads include it
-    const messages = [
+    const messages: ChatMessage[] = [
       ...plainConversation(600),
-      { role: "system", content: "late system" } as ChatMessage,
-      { role: "user", content: "tail" } as ChatMessage,
+      { role: "system", content: "late system" },
+      { role: "user", content: "tail" },
     ];
     const source = windowedMessageRows(inMemoryConversation(messages));
 

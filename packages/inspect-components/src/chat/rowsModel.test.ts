@@ -62,18 +62,18 @@ const kitchenSink: ChatMessage[] = [
   },
   { role: "tool", content: "ok", tool_call_id: "c-3" },
   { role: "assistant", content: "bye" },
-] as ChatMessage[];
+];
 
 const leadingTools: ChatMessage[] = [
   { role: "tool", content: "orphan", tool_call_id: "c-0" },
   { role: "user", content: "hi" },
   { role: "assistant", content: "hello" },
-] as ChatMessage[];
+];
 
 const noSystem: ChatMessage[] = [
   { role: "user", content: "hi" },
   { role: "assistant", content: "hello" },
-] as ChatMessage[];
+];
 
 /**
  * Serve the whole conversation the way a windowed source would: scan for
@@ -215,13 +215,10 @@ describe("MessageRowScanner", () => {
   });
 
   it("treats empty-array system content as no system row", () => {
+    const contentlessSystem: ChatMessage = { role: "system", content: [] };
     const scanner = new MessageRowScanner(messageRowOptions());
-    scanner.next({ role: "system", content: [] } as unknown as ChatMessage, 0);
+    scanner.next(contentlessSystem, 0);
     expect(scanner.hasSystemRow).toBe(false);
-    expect(
-      buildSystemMessageRow([
-        { role: "system", content: [] } as unknown as ChatMessage,
-      ])
-    ).toBeUndefined();
+    expect(buildSystemMessageRow([contentlessSystem])).toBeUndefined();
   });
 });
