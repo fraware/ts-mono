@@ -554,7 +554,8 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
                 // the confirm icon must wait for the clipboard write — it
                 // can reject (unfocused document), and flipping early
                 // reads as a false success
-                exportMessages()
+                exportMessages
+                  .string()
                   .then((text) => navigator.clipboard.writeText(text))
                   .then(() => {
                     setIcon(ApplicationIcons.confirm);
@@ -604,9 +605,10 @@ export const SampleDisplay: FC<SampleDisplayProps> = ({
           ...(exportMessages
             ? {
                 Messages: () => {
-                  exportMessages()
-                    .then((text) =>
-                      api.download_file(`${sampleId}-messages.txt`, text)
+                  exportMessages
+                    .blob()
+                    .then((blob) =>
+                      api.download_file(`${sampleId}-messages.txt`, blob)
                     )
                     .catch((error: unknown) => {
                       console.error("Failed to download messages:", error);

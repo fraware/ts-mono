@@ -19,7 +19,7 @@ describe("useMessagesExport", () => {
       wrapper: makeWrapper(),
     });
 
-    const text = await result.current!();
+    const text = await result.current!.string();
     expect(text).toContain("message 0");
     expect(text).toContain("message 2");
   });
@@ -58,12 +58,16 @@ describe("useMessagesExport", () => {
     });
 
     // export works without the Messages tab ever having been opened
-    const text = await result.current!();
+    const text = await result.current!.string();
     expect(text).toContain("message 0");
     expect(text).toContain("message 3");
 
     // a second export reuses the resident hydration
-    await result.current!();
+    await result.current!.string();
     expect(getRange).toHaveBeenCalledTimes(1);
+
+    // the Blob sink carries the same bytes as the string sink
+    const blob = await result.current!.blob();
+    expect(await blob.text()).toBe(text);
   });
 });

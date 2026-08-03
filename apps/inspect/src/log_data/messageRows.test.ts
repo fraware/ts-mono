@@ -56,8 +56,8 @@ describe("inMemoryMessageRows", () => {
 
     expect(page.rows.map((r) => r.resolved)).toEqual(resolved);
     expect(page.rows.map((r) => r.startNumber)).toEqual(startNumbers);
-    expect(page.totalRowCount).toBe(resolved.length);
-    await expect(source.rowCount()).resolves.toBe(resolved.length);
+    expect(page.knownRowCount).toBe(resolved.length);
+    expect(page.exhausted).toBe(true);
   });
 
   it("pages forward exhaustively without gaps or overlap", async () => {
@@ -85,7 +85,7 @@ describe("inMemoryMessageRows", () => {
 
   it("mints prevCursor as the forward anchor of the preceding page", async () => {
     const source = inMemoryMessageRows(messages);
-    const total = await source.rowCount();
+    const total = (await source.getRows(forward(undefined, 100))).knownRowCount;
 
     const tail = await source.getRows(forward(total - 2, 2));
     expect(tail.prevCursor).toEqual({ offset: Math.max(0, total - 4) });
@@ -115,7 +115,7 @@ describe("inMemoryMessageRows", () => {
 
   it("clamps an out-of-range cursor instead of failing", async () => {
     const source = inMemoryMessageRows(messages);
-    const total = await source.rowCount();
+    const total = (await source.getRows(forward(undefined, 100))).knownRowCount;
     const past = await source.getRows(forward(total + 50, 2));
     expect(past.rows).toEqual([]);
     expect(past.offset).toBe(total);
@@ -124,13 +124,18 @@ describe("inMemoryMessageRows", () => {
 
   it("exports the conversation text from the original messages", async () => {
     const source = inMemoryMessageRows(messages);
-    await expect(source.exportText()).resolves.toBe(messagesToStr(messages));
+    const parts: string[] = [];
+    for await (const part of source.exportText()) {
+      parts.push(part);
+    }
+    expect(parts.join("")).toBe(messagesToStr(messages));
   });
 
   it("handles an empty conversation", async () => {
     const source = inMemoryMessageRows([]);
-    await expect(source.rowCount()).resolves.toBe(0);
     const page = await source.getRows(forward(undefined, 10));
+    expect(page.knownRowCount).toBe(0);
+    expect(page.exhausted).toBe(true);
     expect(page.rows).toEqual([]);
     expect(page.nextCursor).toBeNull();
     expect(page.prevCursor).toBeNull();
