@@ -14,4 +14,10 @@ export const log = {
   debug: (message: string): void => {
     console.log(`[chunked] ${message}`);
   },
+  warn: (message: string): void => {
+    console.warn(`[chunked] ${message}`);
+  },
+  error: (message: string): void => {
+    console.error(`[chunked] ${message}`);
+  },
 };
