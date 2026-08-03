@@ -236,7 +236,6 @@ describe("windowedMessageRows cursor contract", () => {
     });
     expect(stuck.rows).toEqual([]);
     expect(stuck.nextCursor).toBeNull();
-    expect(stuck.prevCursor).toBeNull();
   });
 
   it("clamps an out-of-range cursor once exhausted", async () => {
@@ -265,22 +264,6 @@ describe("windowedMessageRows cursor contract", () => {
       limit: 2,
     });
     expect(bwd.rows).toEqual(fwd.rows);
-  });
-
-  it("mints prevCursor as the forward anchor of the preceding page", async () => {
-    const source = windowedMessageRows(inMemoryConversation(kitchenSink));
-    const page = await source.getRows({
-      cursor: { offset: 3 },
-      direction: "forward",
-      limit: 2,
-    });
-    expect(page.prevCursor).toEqual({ offset: 1 });
-    const first = await source.getRows({
-      cursor: null,
-      direction: "forward",
-      limit: 2,
-    });
-    expect(first.prevCursor).toBeNull();
   });
 });
 

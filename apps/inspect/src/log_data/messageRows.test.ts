@@ -83,17 +83,6 @@ describe("inMemoryMessageRows", () => {
     expect(pages.at(-1)?.nextCursor).toBeNull();
   });
 
-  it("mints prevCursor as the forward anchor of the preceding page", async () => {
-    const source = inMemoryMessageRows(messages);
-    const total = (await source.getRows(forward(undefined, 100))).knownRowCount;
-
-    const tail = await source.getRows(forward(total - 2, 2));
-    expect(tail.prevCursor).toEqual({ offset: Math.max(0, total - 4) });
-
-    const first = await source.getRows(forward(undefined, 2));
-    expect(first.prevCursor).toBeNull();
-  });
-
   it("ignores Pagination.direction — backward requests read the same forward window", async () => {
     const source = inMemoryMessageRows(messages);
     const fwd = await source.getRows(forward(1, 2));
@@ -110,7 +99,6 @@ describe("inMemoryMessageRows", () => {
     const stuck = await source.getRows(forward(2, 0));
     expect(stuck.rows).toEqual([]);
     expect(stuck.nextCursor).toBeNull();
-    expect(stuck.prevCursor).toBeNull();
   });
 
   it("clamps an out-of-range cursor instead of failing", async () => {
@@ -138,7 +126,6 @@ describe("inMemoryMessageRows", () => {
     expect(page.exhausted).toBe(true);
     expect(page.rows).toEqual([]);
     expect(page.nextCursor).toBeNull();
-    expect(page.prevCursor).toBeNull();
   });
 });
 

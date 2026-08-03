@@ -44,10 +44,6 @@ export interface MessageRowsPage {
   exhausted: boolean;
   /** Cursor for the page after this one (null at the end). */
   nextCursor: Cursor | null;
-  /** Forward-read anchor of the preceding page (null at the start). The
-   *  window it opens may overlap this page's first rows when fewer than
-   *  `limit` rows precede it. */
-  prevCursor: Cursor | null;
 }
 
 /**
@@ -99,10 +95,6 @@ export const inMemoryMessageRows = (
         knownRowCount: all.length,
         exhausted: true,
         nextCursor: hi < all.length && hi > lo ? { offset: hi } : null,
-        prevCursor:
-          lo > 0 && hi > lo
-            ? { offset: Math.max(0, lo - pagination.limit) }
-            : null,
       });
     },
     // eslint-disable-next-line @typescript-eslint/require-await

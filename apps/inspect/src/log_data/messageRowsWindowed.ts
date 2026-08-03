@@ -175,10 +175,6 @@ export const windowedMessageRows = (
         exhausted,
         nextCursor:
           hi > lo && (hi < known || !exhausted) ? { offset: hi } : null,
-        prevCursor:
-          lo > 0 && hi > lo
-            ? { offset: Math.max(0, lo - pagination.limit) }
-            : null,
       };
     },
 
