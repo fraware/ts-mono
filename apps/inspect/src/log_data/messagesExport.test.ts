@@ -20,7 +20,7 @@ describe("useMessagesExport", () => {
       wrapper: makeWrapper(),
     });
 
-    const text = await result.current!.string();
+    const text = (await result.current!()).join("");
     expect(text).toContain("message 0");
     expect(text).toContain("message 2");
   });
@@ -70,16 +70,12 @@ describe("useMessagesExport", () => {
     });
 
     // export works without the Messages tab ever having been opened
-    const text = await result.current!.string();
+    const text = (await result.current!()).join("");
     expect(text).toContain("message 0");
     expect(text).toContain("message 3");
 
     // a second export reads through the shared chunk caches
-    await result.current!.string();
+    await result.current!();
     expect(byteReads).toBe(1);
-
-    // the Blob sink carries the same bytes as the string sink
-    const blob = await result.current!.blob();
-    expect(await blob.text()).toBe(text);
   });
 });
