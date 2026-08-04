@@ -16,6 +16,30 @@ import {
   withAttachmentsResolved,
 } from "./chunkedAttachments";
 
+declare const unresolved: unique symbol;
+
+/**
+ * A message that may still contain `attachment://<n>` refs in its content.
+ * Opaque on purpose: everything downstream of the log_data layer is typed
+ * `ChatMessage` and written against the "UI never sees a ref" invariant
+ * (design/large-samples.md), so raw messages must not be assignable to it.
+ * Structure — role, tool calls, content presence — is trustworthy; content
+ * text is not. Go through `rawStructure` to read it.
+ */
+export type RawChatMessage = { readonly [unresolved]: true };
+
+/**
+ * View a raw message for structure-only inspection (role, tool calls,
+ * content presence). The one sanctioned escape hatch from
+ * `RawChatMessage`: calling it asserts the caller never surfaces the
+ * message's content, which may be an unresolved `attachment://<n>` ref.
+ */
+export const rawStructure = (message: RawChatMessage): ChatMessage =>
+  message as unknown as ChatMessage;
+
+const asRaw = (messages: ChatMessage[]): RawChatMessage[] =>
+  messages as unknown as RawChatMessage[];
+
 export interface SampleConversation {
   /** Exact length of the final conversation. Cheap for every format:
    *  inline arrays know their length, chunked shells carry ref widths. */
@@ -24,11 +48,11 @@ export interface SampleConversation {
    *  Out-of-range bounds clamp to `[0, messageCount)`. */
   getMessages(start: number, end: number): Promise<ChatMessage[]>;
   /**
-   * Messages `[start, end)` with attachment refs left unresolved — for
-   * scans that only inspect structure (roles, tool calls, content
+   * Messages `[start, end)` with attachment refs possibly unresolved —
+   * for scans that only inspect structure (roles, tool calls, content
    * presence) and must not pay attachment downloads. Same clamping.
    */
-  getMessagesRaw(start: number, end: number): Promise<ChatMessage[]>;
+  getMessagesRaw(start: number, end: number): Promise<RawChatMessage[]>;
 }
 
 /**
@@ -44,7 +68,7 @@ export const inMemoryConversation = (
   return {
     messageCount: messages.length,
     getMessages,
-    getMessagesRaw: getMessages,
+    getMessagesRaw: (start, end) => getMessages(start, end).then(asRaw),
   };
 };
 
@@ -120,6 +144,6 @@ export const chunkedConversation = (
   return {
     messageCount,
     getMessages: (start, end) => readRanges(start, end, true),
-    getMessagesRaw: (start, end) => readRanges(start, end, false),
+    getMessagesRaw: (start, end) => readRanges(start, end, false).then(asRaw),
   };
 };

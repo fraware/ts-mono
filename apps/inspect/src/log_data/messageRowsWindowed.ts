@@ -19,7 +19,7 @@ import {
 } from "@tsmono/inspect-components/chat";
 
 import { log } from "./chunked/log";
-import { type SampleConversation } from "./conversation";
+import { rawStructure, type SampleConversation } from "./conversation";
 import {
   kDefaultMessageRowOptions,
   type MessageRowsPage,
@@ -78,7 +78,8 @@ class LazyRowIndex {
         );
         const batch = await this.conversation.getMessagesRaw(this.scanPos, end);
         batch.forEach((message, i) => {
-          this.scanner.next(message, this.scanPos + i);
+          // structure-only read: the scanner keeps row facts, never content
+          this.scanner.next(rawStructure(message), this.scanPos + i);
         });
         this.scanPos = end;
       }

@@ -6,6 +6,7 @@ import {
   chunkedConversation,
   conversationRanges,
   inMemoryConversation,
+  rawStructure,
 } from "./conversation";
 import { sequenceReaderOver, testChunkedSample } from "./testFixtures";
 
@@ -67,8 +68,16 @@ describe("chunkedConversation raw reads", () => {
     const conversation = chunkedConversation(chunked);
 
     const raw = await conversation.getMessagesRaw(0, 2);
-    expect(raw.map((m) => m.content)).toEqual(["attachment://0", "plain"]);
+    expect(raw.map((m) => rawStructure(m).content)).toEqual([
+      "attachment://0",
+      "plain",
+    ]);
     expect(attachmentReads).not.toHaveBeenCalled();
+
+    // the opaque type keeps raw messages out of ChatMessage-typed APIs
+    // @ts-expect-error -- RawChatMessage is not assignable to ChatMessage
+    const escaped: ChatMessage[] = raw;
+    void escaped;
 
     const resolved = await conversation.getMessages(0, 2);
     expect(resolved.map((m) => m.content)).toEqual([
