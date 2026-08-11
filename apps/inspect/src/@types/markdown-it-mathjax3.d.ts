@@ -1,5 +1,5 @@
 declare module "markdown-it-mathjax3" {
-  import MarkdownIt from "markdown-it";
+  import type { MarkdownIt } from "markdown-it";
 
   interface MathjaxOptions {
     tex?: {

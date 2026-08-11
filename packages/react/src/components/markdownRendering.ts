@@ -3,7 +3,7 @@
  * Extracted for testability (no CSS/React imports).
  */
 
-import MarkdownIt from "markdown-it";
+import markdownit, { type MarkdownIt } from "markdown-it";
 
 import {
   canonicalImageSource,
@@ -67,7 +67,7 @@ export const getMarkdownInstance = async (
   }
 
   if (renderer === "textOnly") {
-    const md = new MarkdownIt("zero", { breaks: true, html: false }).enable([
+    const md = new markdownit("zero", { breaks: true, html: false }).enable([
       "emphasis",
       "newline",
     ]);
@@ -75,14 +75,15 @@ export const getMarkdownInstance = async (
     return md;
   }
 
-  const md = new MarkdownIt({ breaks: true, html: true });
+  const md = new markdownit({ breaks: true, html: true });
   md.renderer.rules.image = (tokens, idx) => {
     const token = tokens[idx];
     if (!token) {
       return "";
     }
 
-    const source = token.attrGet("src") ?? "";
+    // attrGet returns string | number as of markdown-it 15
+    const source = String(token.attrGet("src") ?? "");
     const alt = token.content.trim();
 
     // Base64 raster data URIs issue no network request, so rendering them
@@ -91,7 +92,9 @@ export const getMarkdownInstance = async (
     const canonicalSource = canonicalImageSource(source);
     if (canonicalSource !== undefined) {
       const title = token.attrGet("title");
-      const titleAttr = title ? ` title="${md.utils.escapeHtml(title)}"` : "";
+      const titleAttr = title
+        ? ` title="${md.utils.escapeHtml(String(title))}"`
+        : "";
       return `<img src="${md.utils.escapeHtml(canonicalSource)}" alt="${md.utils.escapeHtml(alt)}"${titleAttr}>`;
     }
 
