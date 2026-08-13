@@ -12,7 +12,7 @@ import {
 } from "react";
 
 import {
-  useExtendedFind,
+  useExtendedFindOptional,
   type ExtendedCountFn,
   type ExtendedFindFn,
 } from "../components/ExtendedFindContext";
@@ -81,10 +81,14 @@ export const countMatchesInTexts = (
 export function VirtualList<T>({
   persistenceKey,
   ref,
+  id,
   className,
   scrollRef: externalScrollRef,
   data,
   renderRow,
+  estimatedItemHeight = DEFAULT_ITEM_HEIGHT_PX,
+  overscan,
+  resetScrollOnMount = true,
   live,
   navOwned,
   followRequested,
@@ -102,7 +106,41 @@ export function VirtualList<T>({
   // scroll element even when the ref target mounts after us. Without
   // this, the first trackpad swipe goes to the wrong scroll ancestor.
   const internalScrollRef = useRef<HTMLDivElement | null>(null);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [scrollParent, setScrollParent] = useState<HTMLElement | null>(null);
+
+  // Offset of the list within an external scroll parent. Content can sit
+  // above an embedded list in a shared scroller, so item coordinates must be
+  // shifted by this margin (TanStack's scrollMargin) to line up with the
+  // container's scrollTop — Virtuoso derived this from customScrollParent
+  // automatically.
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const measureScrollMargin = useCallback(() => {
+    const wrapper = wrapperRef.current;
+    const parent = externalScrollRef?.current ?? null;
+    let margin = 0;
+    if (wrapper && parent) {
+      const parentRect = parent.getBoundingClientRect();
+      // A zero-size parent rect means "not laid out" (display:none, or a
+      // rect-less test DOM) — rect math would degenerate to scrollTop.
+      if (parentRect.width > 0 || parentRect.height > 0) {
+        margin = Math.max(
+          0,
+          Math.round(
+            wrapper.getBoundingClientRect().top -
+              parentRect.top +
+              parent.scrollTop
+          )
+        );
+      }
+    }
+    setScrollMargin((prev) => (prev === margin ? prev : margin));
+  }, [externalScrollRef]);
+  // Every commit: content above the list can shift it without this component
+  // re-rendering in the same pass; the MutationObserver below catches the
+  // out-of-band cases (a sibling list expanding, chrome collapsing).
+  useLayoutEffect(measureScrollMargin);
+
   useEffect(() => {
     if (!externalScrollRef) return;
     const sync = () => {
@@ -111,12 +149,13 @@ export function VirtualList<T>({
           ? prev
           : (externalScrollRef.current ?? null)
       );
+      measureScrollMargin();
     };
     sync();
     const observer = new MutationObserver(sync);
     observer.observe(document.body, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [externalScrollRef]);
+  }, [externalScrollRef, measureScrollMargin]);
   const getScrollElement = useCallback(
     () => scrollParent ?? internalScrollRef.current,
     [scrollParent]
@@ -125,11 +164,13 @@ export function VirtualList<T>({
   const { virtualizer, scale, toContentScroll, toSpacerScroll } =
     useScaledVirtualizer({
       count: data.length,
-      estimateSize: () => DEFAULT_ITEM_HEIGHT_PX,
+      estimateSize: () => estimatedItemHeight,
       getScrollElement,
+      overscan,
       // A stable virtualizer option rather than a post-scroll `scrollTop +=`,
       // so tanstack's reconcile re-applies it instead of erasing it on far jumps.
       scrollPaddingStart: scrollPaddingStart ?? 0,
+      scrollMargin,
     });
 
   const { getRestoreSnapshot, recordSnapshot } =
@@ -499,7 +540,7 @@ export function VirtualList<T>({
         if (!userScrolledRef.current) {
           const maxScroll = Math.max(
             0,
-            virtualizer.getTotalSize() - el.clientHeight
+            virtualizer.getTotalSize() + scrollMargin - el.clientHeight
           );
           const offset =
             snapshot.totalCount === data.length
@@ -508,7 +549,11 @@ export function VirtualList<T>({
           el.scrollTop = toSpacerScroll(offset);
         }
         release();
-      } else if (!userScrolledRef.current && !hasResetTopRef.current) {
+      } else if (
+        !userScrolledRef.current &&
+        !hasResetTopRef.current &&
+        resetScrollOnMount
+      ) {
         // No snapshot: reset to top once WITHOUT committing the one-shot
         // guard (a snapshot may rehydrate later), but flag the reset so
         // re-fires don't keep forcing 0 against a deep-link scroll.
@@ -541,6 +586,8 @@ export function VirtualList<T>({
     getScrollElement,
     toSpacerScroll,
     virtualizer,
+    scrollMargin,
+    resetScrollOnMount,
   ]);
 
   const buildSnapshot = useCallback(
@@ -686,7 +733,7 @@ export function VirtualList<T>({
     ]
   );
 
-  const { registerVirtualList, registerMatchCounter } = useExtendedFind();
+  const extendedFind = useExtendedFindOptional();
   const searchInData = useCallback<ExtendedFindFn>(
     (term, direction, onContentReady) => {
       if (!term || data.length === 0) return Promise.resolve(false);
@@ -728,15 +775,18 @@ export function VirtualList<T>({
 
   // Pre-compute lowercased search text for every item once per data /
   // accessor change, so the FindBand counter doesn't re-extract and
-  // re-lowercase the whole list on each keystroke.
+  // re-lowercase the whole list on each keystroke. Skipped entirely when the
+  // list doesn't participate in find — extraction can be expensive (default
+  // accessor JSON.stringifies every item).
   const precomputedSearchTexts = useMemo(() => {
+    if (findScope === "none" || !extendedFind) return [];
     const getText = itemSearchText ?? ((item: T) => JSON.stringify(item));
     return data.map((item) => {
       const texts = getText(item);
       const textArray = Array.isArray(texts) ? texts : [texts];
       return textArray.map((t) => t.toLowerCase());
     });
-  }, [data, itemSearchText]);
+  }, [data, itemSearchText, findScope, extendedFind]);
 
   const countMatchesInData = useCallback<ExtendedCountFn>(
     (term) => {
@@ -747,9 +797,12 @@ export function VirtualList<T>({
   );
 
   useEffect(() => {
-    if (findScope === "none") return;
-    const u1 = registerVirtualList(persistenceKey, searchInData);
-    const u2 = registerMatchCounter(persistenceKey, countMatchesInData);
+    if (findScope === "none" || !extendedFind) return;
+    const u1 = extendedFind.registerVirtualList(persistenceKey, searchInData);
+    const u2 = extendedFind.registerMatchCounter(
+      persistenceKey,
+      countMatchesInData
+    );
     return () => {
       u1();
       u2();
@@ -757,8 +810,7 @@ export function VirtualList<T>({
   }, [
     findScope,
     persistenceKey,
-    registerVirtualList,
-    registerMatchCounter,
+    extendedFind,
     searchInData,
     countMatchesInData,
   ]);
@@ -769,22 +821,33 @@ export function VirtualList<T>({
 
   // Padding divs are in SPACER space (divided by scale) so no element exceeds
   // the browser's max height cap; the rendered band stays in content space.
+  // Item coordinates include scrollMargin (they're in scroll-element space);
+  // the DOM content above the list already occupies that span, so it is
+  // subtracted from the list's own padding. getTotalSize() excludes it.
   const firstItem = items.length > 0 ? items[0] : undefined;
   const lastItem = items.length > 0 ? items[items.length - 1] : undefined;
-  const topPaddingContent = firstItem?.start ?? 0;
+  const bandStart = firstItem?.start ?? 0;
+  const topPaddingContent = firstItem ? firstItem.start - scrollMargin : 0;
   const topPaddingSpacer = topPaddingContent / scale;
   const renderedBandHeight =
     firstItem && lastItem
       ? lastItem.start + lastItem.size - firstItem.start
       : 0;
   const bottomPaddingContent = lastItem
-    ? Math.max(0, virtualizer.getTotalSize() - (lastItem.start + lastItem.size))
+    ? Math.max(
+        0,
+        virtualizer.getTotalSize() +
+          scrollMargin -
+          (lastItem.start + lastItem.size)
+      )
     : virtualizer.getTotalSize();
   const bottomPaddingSpacer = bottomPaddingContent / scale;
 
   return (
     <div
+      id={id}
       ref={(el) => {
+        wrapperRef.current = el;
         if (!ownsScroll) return;
         internalScrollRef.current = el;
         // Push the mounted element into state so getScrollElement gets a
@@ -804,7 +867,7 @@ export function VirtualList<T>({
         {items.map((vItem) => {
           const item = data[vItem.index];
           if (item === undefined) return null;
-          const top = vItem.start - topPaddingContent;
+          const top = vItem.start - bandStart;
           const child = renderRow(vItem.index, item);
           if (ItemSlot) {
             return (
