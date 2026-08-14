@@ -5,42 +5,13 @@ import { PopOver } from "@tsmono/react/components";
 
 import { ScalarValue } from "../../api/api";
 import { ApplicationIcons } from "../../icons";
-import type { OperatorModel } from "../../query";
 
 import { Chip } from "./Chip";
-import {
-  ColumnFilterEditor,
-  type AvailableColumn,
-} from "./columnFilter/ColumnFilterEditor";
+import { ColumnFilterEditor } from "./columnFilter";
+import type { useAddFilterPopover } from "./columnFilter/useAddFilterPopover";
 import styles from "./FilterBar.module.css";
 
-/** Props accepted by AddFilterButton - subset of useAddFilterPopover return */
-export interface AddFilterPopoverState {
-  isOpen: boolean;
-  setIsOpen: (open: boolean) => void;
-  selectedColumnId: string | null;
-  columns: AvailableColumn[];
-  filterType:
-    | "string"
-    | "number"
-    | "date"
-    | "datetime"
-    | "boolean"
-    | "duration"
-    | "unknown";
-  operator: OperatorModel;
-  setOperator: (op: OperatorModel) => void;
-  operatorOptions: OperatorModel[];
-  value: string;
-  setValue: (v: string) => void;
-  value2: string;
-  setValue2: (v: string) => void;
-  isValueDisabled: boolean;
-  isRangeOperator: boolean;
-  handleColumnChange: (columnId: string) => void;
-  commitAndClose: () => void;
-  cancelAndClose: () => void;
-}
+export type AddFilterPopoverState = ReturnType<typeof useAddFilterPopover>;
 
 export interface AddFilterButtonProps {
   /** Unique prefix for popover IDs */
@@ -51,10 +22,7 @@ export interface AddFilterButtonProps {
   suggestions?: ScalarValue[];
 }
 
-/**
- * "Add filter" chip + popover pattern extracted for reuse.
- * Accepts popover state from useAddFilterPopover hook.
- */
+/** "Add filter" chip plus Scout's column picker and the shared filter editor. */
 export const AddFilterButton: FC<AddFilterButtonProps> = ({
   idPrefix,
   popoverState,
@@ -77,6 +45,17 @@ export const AddFilterButton: FC<AddFilterButtonProps> = ({
     setValue2,
     isValueDisabled,
     isRangeOperator,
+    join,
+    setJoin,
+    secondOperator,
+    setSecondOperator,
+    secondValue,
+    setSecondValue,
+    secondValue2,
+    setSecondValue2,
+    showSecond,
+    secondUsesValue,
+    secondUsesRangeValue,
     handleColumnChange,
     commitAndClose,
     cancelAndClose,
@@ -107,25 +86,64 @@ export const AddFilterButton: FC<AddFilterButtonProps> = ({
           backgroundColor: "var(--bs-light)",
         }}
       >
-        <ColumnFilterEditor
-          mode="add"
-          columnId={selectedColumnId ?? ""}
-          filterType={filterType}
-          operator={operator}
-          operatorOptions={operatorOptions}
-          rawValue={value}
-          rawValue2={value2}
-          isValueDisabled={isValueDisabled}
-          isRangeOperator={isRangeOperator}
-          onOperatorChange={setOperator}
-          onValueChange={setValue}
-          onValue2Change={setValue2}
-          onCommit={commitAndClose}
-          onCancel={cancelAndClose}
-          suggestions={suggestions}
-          columns={columns}
-          onColumnChange={handleColumnChange}
-        />
+        <select
+          id={`${idPrefix}-column-select`}
+          className={styles.addFilterColumnSelect}
+          value={selectedColumnId ?? ""}
+          onChange={(event) => handleColumnChange(event.target.value)}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelAndClose();
+            }
+          }}
+          // eslint-disable-next-line jsx-a11y/no-autofocus -- the popover was explicitly opened by the user
+          autoFocus
+        >
+          <option value="">Select column...</option>
+          {columns.map((column) => (
+            <option key={column.id} value={column.id}>
+              {column.label}
+            </option>
+          ))}
+        </select>
+        {selectedColumnId && (
+          <ColumnFilterEditor
+            columnId={selectedColumnId}
+            filterType={filterType}
+            operatorOptions={operatorOptions}
+            condition={{
+              operator,
+              onOperatorChange: setOperator,
+              value,
+              onValueChange: setValue,
+              value2,
+              onValue2Change: setValue2,
+              isValueDisabled,
+              isRangeOperator,
+            }}
+            second={
+              showSecond
+                ? {
+                    operator: secondOperator,
+                    onOperatorChange: setSecondOperator,
+                    value: secondValue,
+                    onValueChange: setSecondValue,
+                    value2: secondValue2,
+                    onValue2Change: setSecondValue2,
+                    isValueDisabled: !secondUsesValue,
+                    isRangeOperator: secondUsesRangeValue,
+                  }
+                : undefined
+            }
+            join={join}
+            onJoinChange={setJoin}
+            onCommit={commitAndClose}
+            onCancel={cancelAndClose}
+            suggestions={suggestions}
+          />
+        )}
       </PopOver>
     </>
   );
