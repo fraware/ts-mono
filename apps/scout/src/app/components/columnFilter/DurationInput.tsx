@@ -20,6 +20,7 @@ export const DurationInput: FC<DurationInputProps> = ({
   autoFocus,
 }) => {
   const parsedSeconds = useMemo(() => {
+    if (value.trim() === "") return null;
     const num = Number(value);
     return Number.isFinite(num) && num >= 0 ? num : null;
   }, [value]);

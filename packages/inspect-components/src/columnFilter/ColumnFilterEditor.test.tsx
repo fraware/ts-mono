@@ -95,6 +95,18 @@ describe("ColumnFilterEditor", () => {
     expect(screen.getByRole("spinbutton", { name: "End" })).not.toBeNull();
   });
 
+  it("does not render a duration helper for an empty value", () => {
+    render(
+      <ColumnFilterEditor
+        columnId="duration"
+        filterType="duration"
+        operatorOptions={OPERATORS_BY_TYPE.duration}
+        condition={condition({ operator: "=", value: "" })}
+      />
+    );
+    expect(screen.queryByText("0 sec")).toBeNull();
+  });
+
   it("omits the second condition row when second is undefined", () => {
     const { container } = render(
       <ColumnFilterEditor
