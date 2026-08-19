@@ -9,10 +9,7 @@ import { create } from "zustand";
 import { createJSONStorage, devtools, persist } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
 
-import type {
-  ColumnFilter,
-  FilterType,
-} from "@tsmono/inspect-components/columnFilter";
+import type { ColumnFilter } from "@tsmono/inspect-components/columnFilter";
 import {
   createInitialSearchPanelState,
   normalizeSearchPanelState,
@@ -31,7 +28,6 @@ import {
   SortColumn,
 } from "../app/types";
 import { TranscriptInfo } from "../types/api-types";
-import { migrateFilterState } from "./filterStateMigration";
 
 export type {
   ColumnFilter,
@@ -810,9 +806,7 @@ export const createStore = (api: ScoutApiV2) =>
           storage: createDebouncedPersistStorage(
             createJSONStorage(() => api.storage)
           ),
-          version: 2,
-          migrate: (persistedState, version) =>
-            migrateFilterState(persistedState, version) as StoreState,
+          version: 1,
           partialize: (state) => {
             const {
               hasInitializedRouting,

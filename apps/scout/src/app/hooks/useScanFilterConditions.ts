@@ -1,13 +1,14 @@
-import { useStore } from "../../state/store";
+import { combineFilters } from "@tsmono/inspect-components/columnFilter";
 
-import { combineColumnFilters } from "./combineColumnFilters";
+import { useStore } from "../../state/store";
 
 /**
  * Build a combined filter condition from scans column filters.
  * @param excludeColumnId - Optional column ID to exclude from the condition
  */
 export const useScanFilterConditions = (excludeColumnId?: string) => {
-  const columnFilters =
-    useStore((state) => state.scansTableState.columnFilters) ?? {};
-  return combineColumnFilters(columnFilters, excludeColumnId);
+  const columnFilters = useStore(
+    (state) => state.scansTableState.columnFilters
+  );
+  return combineFilters(columnFilters, excludeColumnId);
 };

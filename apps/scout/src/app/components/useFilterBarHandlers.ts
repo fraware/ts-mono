@@ -16,14 +16,28 @@ interface BaseTableState {
 }
 
 interface FilterBarHandlers {
-  /** Update a filter's spec or remove it if the spec is null. */
+  /**
+   * Update a filter's spec or remove it if spec is null
+   */
   handleFilterChange: (columnId: string, spec: FilterSpec | null) => void;
-  /** Remove a filter by column ID. */
+  /**
+   * Remove a filter by column ID
+   */
   removeFilter: (column: string) => void;
-  /** Add a new filter, ensuring the column is visible. */
+  /**
+   * Add a new filter, ensuring the column is visible
+   */
   handleAddFilter: (filter: ColumnFilter) => void;
 }
 
+/**
+ * Creates filter bar handler functions for a table state.
+ * This is the core logic shared between scans and transcripts filter bars.
+ *
+ * @param setTableState - Store setter function
+ * @param defaultVisibleColumns - Default columns when state doesn't have them
+ * @returns Object with handler functions
+ */
 function createFilterBarHandlers<
   TColumnKey extends string,
   TState extends BaseTableState = BaseTableState,
@@ -66,10 +80,16 @@ function createFilterBarHandlers<
   const handleAddFilter = (filter: ColumnFilter) => {
     setTableState((prevState) => {
       const columnKey = filter.columnId as TColumnKey;
+
+      // Use default visible columns if not set in state
       const currentVisibleColumns =
         (prevState.visibleColumns as TColumnKey[] | undefined) ??
         ([...defaultVisibleColumns] as TColumnKey[]);
+
+      // Check if we need to add this column to visible columns
       const needsColumnVisible = !currentVisibleColumns.includes(columnKey);
+
+      // Check if we need to add this column to column order
       const columnOrder = prevState.columnOrder as TColumnKey[];
       const needsColumnOrder =
         columnOrder.length > 0 && !columnOrder.includes(columnKey);
@@ -80,9 +100,11 @@ function createFilterBarHandlers<
           ...prevState.columnFilters,
           [filter.columnId]: filter,
         },
+        // Add the column to visible columns if it's not already there
         ...(needsColumnVisible && {
           visibleColumns: [...currentVisibleColumns, columnKey],
         }),
+        // Add the column to column order if it's not already there
         ...(needsColumnOrder && {
           columnOrder: [...columnOrder, columnKey],
         }),
@@ -101,10 +123,20 @@ interface UseFilterBarHandlersOptions<
   TColumnKey extends string,
   TState extends BaseTableState = BaseTableState,
 > {
+  /**
+   * Store setter function that accepts an updater
+   */
   setTableState: (updater: TState | ((prev: TState) => TState)) => void;
+  /**
+   * Default visible columns to use when state doesn't have them set
+   */
   defaultVisibleColumns: readonly TColumnKey[];
 }
 
+/**
+ * Hook that provides common filter bar handlers for both scans and transcripts tables.
+ * Extracts the duplicated logic from ScansFilterBar and TranscriptFilterBar.
+ */
 export function useFilterBarHandlers<
   TColumnKey extends string,
   TState extends BaseTableState = BaseTableState,
@@ -112,11 +144,13 @@ export function useFilterBarHandlers<
   setTableState,
   defaultVisibleColumns,
 }: UseFilterBarHandlersOptions<TColumnKey, TState>): FilterBarHandlers {
+  // Memoize the handlers to maintain referential stability
   const handlers = useMemo(
     () => createFilterBarHandlers(setTableState, defaultVisibleColumns),
     [setTableState, defaultVisibleColumns]
   );
 
+  // Wrap in useCallback for consistent return types
   const handleFilterChange = useCallback(
     (columnId: string, spec: FilterSpec | null) => {
       handlers.handleFilterChange(columnId, spec);

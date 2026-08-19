@@ -12,6 +12,7 @@ import { Chip } from "./Chip";
 import { ChipGroup } from "./ChipGroup";
 import {
   ColumnFilterEditor,
+  isColumnFilter,
   NO_VALUE_OPERATORS,
   OPERATOR_LABELS,
   RANGE_VALUE_OPERATORS,
@@ -150,21 +151,24 @@ export const FilterBar: FC<FilterBarProps> = ({
         Filter:
       </div>
       <ChipGroup className={styles.filterBar}>
-        {Object.values(filters).map((filter) => (
-          <Chip
-            key={filter.columnId}
-            ref={(element) => {
-              chipRefs.current[filter.columnId] = element;
-            }}
-            label={filter.columnId}
-            value={formatFilterSpec(filter.spec)}
-            title={`Edit ${filter.columnId} filter`}
-            closeTitle="Remove filter"
-            className={clsx(styles.filterChip, "text-size-smallest")}
-            onClose={() => onRemoveFilter(filter.columnId)}
-            onClick={editFilter(filter.columnId)}
-          />
-        ))}
+        {/* isColumnFilter drops entries persisted by pre-FilterSpec builds */}
+        {Object.values(filters)
+          .filter(isColumnFilter)
+          .map((filter) => (
+            <Chip
+              key={filter.columnId}
+              ref={(element) => {
+                chipRefs.current[filter.columnId] = element;
+              }}
+              label={filter.columnId}
+              value={formatFilterSpec(filter.spec)}
+              title={`Edit ${filter.columnId} filter`}
+              closeTitle="Remove filter"
+              className={clsx(styles.filterChip, "text-size-smallest")}
+              onClose={() => onRemoveFilter(filter.columnId)}
+              onClick={editFilter(filter.columnId)}
+            />
+          ))}
         <AddFilterButton
           idPrefix={popoverIdPrefix}
           popoverState={addFilterPopoverState}

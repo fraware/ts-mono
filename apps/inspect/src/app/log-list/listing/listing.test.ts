@@ -2,15 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import { Column, ConditionBuilder } from "@tsmono/inspect-common/query";
 import type { Condition } from "@tsmono/inspect-common/query";
-import type {
-  ColumnFilter,
-  FilterType,
+import {
+  combineFilters,
+  type ColumnFilter,
+  type FilterType,
 } from "@tsmono/inspect-components/columnFilter";
 
 import { numberCompare } from "../grid/columns/comparators";
 
 import { applyListingQuery, mergeSortedRows } from "./applyListingQuery";
-import { combineFilters } from "./combineFilters";
 import { evaluateCondition } from "./evaluator";
 import type { ValueComparator } from "./types";
 

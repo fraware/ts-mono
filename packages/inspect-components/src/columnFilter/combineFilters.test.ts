@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { ColumnFilter } from "@tsmono/inspect-components/columnFilter";
+import { combineFilters } from "./combineFilters";
+import type { ColumnFilter } from "./types";
 
-import { combineColumnFilters } from "./combineColumnFilters";
-
-describe("combineColumnFilters", () => {
+describe("combineFilters", () => {
   const filters: Record<string, ColumnFilter> = {
     model: {
       columnId: "model",
@@ -19,7 +18,7 @@ describe("combineColumnFilters", () => {
   };
 
   it("compiles specs and ANDs filters across columns", () => {
-    expect(combineColumnFilters(filters)?.toJSON()).toEqual({
+    expect(combineFilters(filters)?.toJSON()).toEqual({
       is_compound: true,
       left: {
         is_compound: false,
@@ -51,7 +50,7 @@ describe("combineColumnFilters", () => {
       },
     };
 
-    expect(combineColumnFilters(paired)?.toJSON()).toEqual({
+    expect(combineFilters(paired)?.toJSON()).toEqual({
       is_compound: true,
       left: {
         is_compound: false,
@@ -70,11 +69,26 @@ describe("combineColumnFilters", () => {
   });
 
   it("can exclude the column being queried for suggestions", () => {
-    expect(combineColumnFilters(filters, "model")?.toJSON()).toEqual({
+    expect(combineFilters(filters, "model")?.toJSON()).toEqual({
       is_compound: false,
       left: "score",
       operator: ">",
       right: 0.5,
     });
+  });
+
+  it("drops entries persisted by pre-FilterSpec builds", () => {
+    const stale = {
+      model: {
+        columnId: "model",
+        filterType: "string",
+        condition: { left: "model", operator: "ILIKE", right: "%sonnet%" },
+      } as unknown as ColumnFilter,
+    };
+    expect(combineFilters(stale)).toBeUndefined();
+  });
+
+  it("returns undefined for missing filter maps", () => {
+    expect(combineFilters(undefined)).toBeUndefined();
   });
 });
