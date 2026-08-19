@@ -1,7 +1,6 @@
 export { ColumnFilterControl } from "./ColumnFilterControl";
 export { ColumnFilterButton } from "./ColumnFilterButton";
 export { ColumnFilterEditor } from "./ColumnFilterEditor";
-export { DurationInput } from "@tsmono/inspect-components/columnFilter";
 export { useColumnFilter } from "./useColumnFilter";
 export { useColumnFilterPopover } from "./useColumnFilterPopover";
 export { useAddFilterPopover } from "./useAddFilterPopover";
