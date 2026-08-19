@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import { ChangeEvent, FC, KeyboardEvent, useCallback } from "react";
 
+import { DurationInput } from "@tsmono/inspect-components/columnFilter";
 import { AutocompleteInput } from "@tsmono/react/components";
 
 import { ScalarValue } from "../../../api/api";
@@ -8,7 +9,6 @@ import type { OperatorModel } from "../../../query";
 import type { FilterType } from "../../../state/store";
 
 import styles from "./ColumnFilterEditor.module.css";
-import { DurationInput } from "./DurationInput";
 
 export interface AvailableColumn {
   id: string;
