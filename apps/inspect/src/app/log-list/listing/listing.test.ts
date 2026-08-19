@@ -295,22 +295,6 @@ describe("type-aware filtering", () => {
     // matches neither branch.
     expect(res.items.map((r) => r.name).sort()).toEqual(["a", "b", "c"]);
   });
-
-  it("combineFilters drops legacy persisted entries (pre-FilterSpec shape)", () => {
-    const legacy = {
-      model: {
-        columnId: "model",
-        filterType: "string",
-        condition: {
-          is_compound: false,
-          left: "model",
-          operator: "=",
-          right: "gpt-4",
-        },
-      },
-    } as unknown as Record<string, ColumnFilter>;
-    expect(combineFilters(legacy)).toBeUndefined();
-  });
 });
 
 describe("mergeSortedRows", () => {

@@ -91,7 +91,11 @@ export function useAddFilterPopover({
   const commitAndClose = useCallback(() => {
     if (!selectedColumnId) return;
     const spec = buildSpec();
-    if (!spec) return;
+    if (spec === undefined) return; // invalid input — keep the popover open
+    if (spec === null) {
+      setIsOpen(false); // empty value — nothing to add
+      return;
+    }
 
     onAddFilter({ columnId: selectedColumnId, filterType, spec });
     setIsOpen(false);

@@ -1,7 +1,10 @@
 import { clsx } from "clsx";
 import { FC, useRef } from "react";
 
-import { ColumnFilterEditor } from "@tsmono/inspect-components/columnFilter";
+import {
+  ColumnFilterEditor,
+  editorConditionProps,
+} from "@tsmono/inspect-components/columnFilter";
 import { PopOver } from "@tsmono/react/components";
 
 import { ScalarValue } from "../../api/api";
@@ -36,26 +39,7 @@ export const AddFilterButton: FC<AddFilterButtonProps> = ({
     selectedColumnId,
     columns,
     filterType,
-    operator,
-    setOperator,
     operatorOptions,
-    value,
-    setValue,
-    value2,
-    setValue2,
-    isValueDisabled,
-    isRangeOperator,
-    join,
-    setJoin,
-    secondOperator,
-    setSecondOperator,
-    secondValue,
-    setSecondValue,
-    secondValue2,
-    setSecondValue2,
-    showSecond,
-    secondUsesValue,
-    secondUsesRangeValue,
     handleColumnChange,
     commitAndClose,
     cancelAndClose,
@@ -113,32 +97,7 @@ export const AddFilterButton: FC<AddFilterButtonProps> = ({
             columnId={selectedColumnId}
             filterType={filterType}
             operatorOptions={operatorOptions}
-            condition={{
-              operator,
-              onOperatorChange: setOperator,
-              value,
-              onValueChange: setValue,
-              value2,
-              onValue2Change: setValue2,
-              isValueDisabled,
-              isRangeOperator,
-            }}
-            second={
-              showSecond
-                ? {
-                    operator: secondOperator,
-                    onOperatorChange: setSecondOperator,
-                    value: secondValue,
-                    onValueChange: setSecondValue,
-                    value2: secondValue2,
-                    onValue2Change: setSecondValue2,
-                    isValueDisabled: !secondUsesValue,
-                    isRangeOperator: secondUsesRangeValue,
-                  }
-                : undefined
-            }
-            join={join}
-            onJoinChange={setJoin}
+            {...editorConditionProps(popoverState)}
             onCommit={commitAndClose}
             onCancel={cancelAndClose}
             suggestions={suggestions}

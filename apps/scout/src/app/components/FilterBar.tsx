@@ -3,6 +3,7 @@ import { FC, useCallback, useRef, useState } from "react";
 
 import {
   ColumnFilterEditor,
+  editorConditionProps,
   isColumnFilter,
   NO_VALUE_OPERATORS,
   OPERATOR_LABELS,
@@ -87,37 +88,19 @@ export const FilterBar: FC<FilterBarProps> = ({
     [editingColumnId, onFilterChange]
   );
 
-  const {
-    isOpen: isEditorOpen,
-    setIsOpen: setIsEditorOpen,
-    operator,
-    setOperator,
-    operatorOptions,
-    value,
-    setValue,
-    value2,
-    setValue2,
-    isValueDisabled,
-    isRangeOperator,
-    join,
-    setJoin,
-    secondOperator,
-    setSecondOperator,
-    secondValue,
-    setSecondValue,
-    secondValue2,
-    setSecondValue2,
-    showSecond,
-    secondUsesValue,
-    secondUsesRangeValue,
-    commitAndClose,
-    cancelAndClose,
-  } = useColumnFilterPopover({
+  const popover = useColumnFilterPopover({
     columnId: editingColumnId ?? "",
     filterType: editingFilter?.filterType ?? "string",
     spec: editingFilter?.spec ?? null,
     onChange: handleFilterChange,
   });
+  const {
+    isOpen: isEditorOpen,
+    setIsOpen: setIsEditorOpen,
+    operatorOptions,
+    commitAndClose,
+    cancelAndClose,
+  } = popover;
 
   const editFilter = useCallback(
     (columnId: string) => () => {
@@ -196,32 +179,7 @@ export const FilterBar: FC<FilterBarProps> = ({
             columnId={editingColumnId}
             filterType={editingFilter.filterType}
             operatorOptions={operatorOptions}
-            condition={{
-              operator,
-              onOperatorChange: setOperator,
-              value,
-              onValueChange: setValue,
-              value2,
-              onValue2Change: setValue2,
-              isValueDisabled,
-              isRangeOperator,
-            }}
-            second={
-              showSecond
-                ? {
-                    operator: secondOperator,
-                    onOperatorChange: setSecondOperator,
-                    value: secondValue,
-                    onValueChange: setSecondValue,
-                    value2: secondValue2,
-                    onValue2Change: setSecondValue2,
-                    isValueDisabled: !secondUsesValue,
-                    isRangeOperator: secondUsesRangeValue,
-                  }
-                : undefined
-            }
-            join={join}
-            onJoinChange={setJoin}
+            {...editorConditionProps(popover)}
             onCommit={commitAndClose}
             onCancel={cancelAndClose}
             suggestions={filterSuggestions}
