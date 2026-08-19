@@ -21,13 +21,15 @@ import {
   useState,
 } from "react";
 
-import type { FilterSpec } from "@tsmono/inspect-components/columnFilter";
+import {
+  ColumnFilterControl,
+  type FilterSpec,
+} from "@tsmono/inspect-components/columnFilter";
 
 import { useLoggingNavigate } from "../../../debugging/navigationDebugging";
 import { ApplicationIcons } from "../../../icons";
 import { openRouteInNewTab } from "../../../router/url";
 import type { FilterType } from "../../../state/store";
-import { ColumnFilterControl } from "../columnFilter";
 import {
   BaseColumnMeta,
   ExtendedColumnDef,

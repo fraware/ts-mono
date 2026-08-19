@@ -1,14 +1,14 @@
 import { clsx } from "clsx";
 import { FC, useRef } from "react";
 
+import { ColumnFilterEditor } from "@tsmono/inspect-components/columnFilter";
 import { PopOver } from "@tsmono/react/components";
 
 import { ScalarValue } from "../../api/api";
 import { ApplicationIcons } from "../../icons";
 
 import { Chip } from "./Chip";
-import { ColumnFilterEditor } from "./columnFilter";
-import type { useAddFilterPopover } from "./columnFilter/useAddFilterPopover";
+import type { useAddFilterPopover } from "./columnFilter";
 import styles from "./FilterBar.module.css";
 
 export type AddFilterPopoverState = ReturnType<typeof useAddFilterPopover>;

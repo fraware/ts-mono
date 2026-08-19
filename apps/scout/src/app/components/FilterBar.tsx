@@ -1,6 +1,16 @@
 import { clsx } from "clsx";
 import { FC, useCallback, useRef, useState } from "react";
 
+import {
+  ColumnFilterEditor,
+  isColumnFilter,
+  NO_VALUE_OPERATORS,
+  OPERATOR_LABELS,
+  RANGE_VALUE_OPERATORS,
+  useColumnFilterPopover,
+  type FilterCondition,
+  type FilterSpec,
+} from "@tsmono/inspect-components/columnFilter";
 import { PopOver, ToolDropdownButton } from "@tsmono/react/components";
 
 import { ScalarValue } from "../../api/api";
@@ -10,17 +20,7 @@ import type { ColumnFilter } from "../../state/store";
 import { AddFilterButton, type AddFilterPopoverState } from "./AddFilterButton";
 import { Chip } from "./Chip";
 import { ChipGroup } from "./ChipGroup";
-import {
-  ColumnFilterEditor,
-  isColumnFilter,
-  NO_VALUE_OPERATORS,
-  OPERATOR_LABELS,
-  RANGE_VALUE_OPERATORS,
-  useColumnFilterPopover,
-  type AvailableColumn,
-  type FilterCondition,
-  type FilterSpec,
-} from "./columnFilter";
+import type { AvailableColumn } from "./columnFilter";
 import { ColumnPickerButton } from "./ColumnPickerButton";
 import { ColumnsPopover, type ColumnInfo } from "./ColumnsPopover";
 import styles from "./FilterBar.module.css";
