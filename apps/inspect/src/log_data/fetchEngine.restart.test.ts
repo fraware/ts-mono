@@ -1,21 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ClientAPI, LogDetails } from "../client/api/types";
+import { testEvalSpec } from "@tsmono/inspect-common/testing";
+
+import { LogDetails } from "../client/api/types";
 
 import { FetchEngine, LogsContentSink } from "./fetchEngine";
+import { testClientAPI, testLogDetails } from "./testFixtures";
 
 const makeDetails = (name: string): LogDetails =>
-  ({
-    version: 2,
-    status: "success",
-    eval: {
-      eval_id: name,
-      run_id: `run-${name}`,
-      task: "task",
-      model: "model",
-    },
-    sampleSummaries: [],
-  }) as unknown as LogDetails;
+  testLogDetails({
+    eval: testEvalSpec({ eval_id: name, run_id: `run-${name}` }),
+  });
 
 const createSink = () => {
   const detailWrites: string[] = [];
@@ -52,8 +47,8 @@ describe("FetchEngine restart", () => {
     const getDetailsB = vi.fn((file: string) =>
       Promise.resolve(makeDetails(file))
     );
-    const apiA = { get_log_details: getDetailsA } as unknown as ClientAPI;
-    const apiB = { get_log_details: getDetailsB } as unknown as ClientAPI;
+    const apiA = testClientAPI({ get_log_details: getDetailsA });
+    const apiB = testClientAPI({ get_log_details: getDetailsB });
 
     const engine = new FetchEngine({
       concurrency: 1,

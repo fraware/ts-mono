@@ -211,6 +211,10 @@ export class WorkQueue<TInput, TOutput> {
     return batch;
   }
 
+  /**
+   * Drop all queued work AND invalidate in-flight batches: their results
+   * are discarded without retry or onComplete.
+   */
   clear() {
     this.generation++;
     this.itemsById.clear();
