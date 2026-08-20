@@ -83,7 +83,7 @@ describe("combineFilters", () => {
         columnId: "model",
         filterType: "string",
         condition: { left: "model", operator: "ILIKE", right: "%sonnet%" },
-      } as unknown as ColumnFilter,
+      },
     };
     expect(combineFilters(stale)).toBeUndefined();
   });
