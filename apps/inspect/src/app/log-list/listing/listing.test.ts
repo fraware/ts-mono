@@ -182,6 +182,27 @@ describe("applyListingQuery", () => {
     expect(res.total_count).toBe(2);
   });
 
+  it("compiles filter types once per simple condition", () => {
+    let filterTypeReads = 0;
+    const getFilterType = (id: string): FilterType | undefined => {
+      filterTypeReads++;
+      return id === "score" ? "number" : "string";
+    };
+    const filter = new Column("model")
+      .ilike("GPT%")
+      .and(new Column("score").gt("0.2"));
+
+    const res = applyListingQuery(rows, {
+      filter,
+      getValue,
+      getComparator,
+      getFilterType,
+    });
+
+    expect(res.items.map((row) => row.name)).toEqual(["a", "d"]);
+    expect(filterTypeReads).toBe(2);
+  });
+
   it("paginates with a forward cursor", () => {
     const first = applyListingQuery(rows, {
       orderBy: { column: "name", direction: "ASC" },
