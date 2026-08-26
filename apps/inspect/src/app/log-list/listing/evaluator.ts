@@ -207,17 +207,6 @@ export function compileCondition<TRow>(
   return (row) => test(getValue(row, condition.left));
 }
 
-/** Evaluate one row against a `Condition`. Listing executors should compile the
- *  condition once via `compileCondition` and reuse the returned predicate. */
-export function evaluateCondition<TRow>(
-  row: TRow,
-  condition: Condition,
-  getValue: ValueAccessor<TRow>,
-  getFilterType?: FilterTypeAccessor
-): boolean {
-  return compileCondition(condition, getValue, getFilterType)(row);
-}
-
 // Default (string-ish) compare: missing values sort as smallest — first
 // ascending, last descending — matching the AG-default comparator the
 // pre-TanStack log list used for columns without a custom comparator.
